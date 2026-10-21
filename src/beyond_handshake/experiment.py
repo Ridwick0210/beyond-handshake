@@ -13,7 +13,8 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from beyond_handshake.capture import capture_loopback, features_from_server_events
+from beyond_handshake.capture import (capture_loopback, features_from_server_events,
+                                      join_and_aggregate, tshark_extract)
 from beyond_handshake.client import run_curl_cffi, run_firefox, run_stdlib, write_attempt
 from beyond_handshake.config import load_server_config
 from beyond_handshake.dataset import build_dataset
@@ -189,7 +190,14 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
     labels_path.write_text(json.dumps(labels, indent=2) + "\n", encoding="utf-8")
     event_features_path = run_dir / "event-features.jsonl"
     feature_manifest = features_from_server_events(event_file, event_features_path)
-    dataset_manifest = build_dataset(event_features_path, labels_path, run_dir / "dataset")
+    packet_manifest, join_manifests, joined_rows = _extract_and_join_captures(outcomes, event_file, run_dir)
+    event_rows = [json.loads(line) for line in event_features_path.read_text(encoding="utf-8").splitlines()
+                  if line.strip()]
+    combined_rows = _combine_feature_sources(joined_rows, event_rows)
+    combined_features_path = run_dir / "features.jsonl"
+    combined_features_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n"
+                                                 for row in combined_rows), encoding="utf-8")
+    dataset_manifest = build_dataset(combined_features_path, labels_path, run_dir / "dataset")
     split_manifest = {"schema_version": "grouped-split/1", "seed": plan["seed"],
         "config_sha256": plan["config_sha256"], "plan_sha256": _sha256(plan_path),
         "train_session_ids": sorted(r["session_id"] for r in labels if r["partition"] == "train"),
@@ -205,6 +213,10 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
     manifest = {"schema_version": "collection-run/1", "experiment_id": plan["experiment_id"],
                 "plan_sha256": _sha256(plan_path), "event_file": str(event_file),
                 "event_features": feature_manifest, "dataset": dataset_manifest,
+                "packet_extractions": packet_manifest, "packet_joins": join_manifests,
+                "joined_packet_connection_count": len(joined_rows),
+                "event_only_connection_count": sum(row.get("feature_source") == "server-events-only"
+                                                    for row in combined_rows),
                 "split_manifest": "split-manifest.json",
                 "attempt_count": len(outcomes),
                 "successful_task_count": sum(o["attempt"]["task_success"] for o in outcomes),
@@ -215,6 +227,38 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
                                 "local development data; not a representative research cohort"]}
     (run_dir / "collection-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
+
+
+def _extract_and_join_captures(outcomes: list[dict], event_file: Path, run_dir: Path) -> tuple[list[dict], list[dict], list[dict]]:
+    """Extract each episode capture and join flows to server connections; preserve all failures."""
+    packet_dir = run_dir / "packet-observations"
+    extraction_reports, join_reports, joined_rows = [], [], []
+    for outcome in outcomes:
+        capture = outcome.get("capture", {})
+        if capture.get("status") != "captured" or not capture.get("capture_path"):
+            continue
+        episode_id = outcome["episode"]["episode_id"]
+        packet_path = packet_dir / f"{episode_id}.tsv"
+        joined_path = packet_dir / f"{episode_id}.joined.jsonl"
+        try:
+            extraction = tshark_extract(Path(capture["capture_path"]), packet_path)
+            joined = join_and_aggregate(packet_path, event_file, joined_path)
+            extraction_reports.append({"episode_id": episode_id, **extraction})
+            join_reports.append({"episode_id": episode_id, **joined})
+            joined_rows.extend(json.loads(line) for line in joined_path.read_text(encoding="utf-8").splitlines()
+                               if line.strip())
+        except (OSError, RuntimeError, ValueError) as exc:
+            extraction_reports.append({"episode_id": episode_id, "status": "failed",
+                                       "error": f"{type(exc).__name__}: {exc}"})
+    return extraction_reports, join_reports, joined_rows
+
+
+def _combine_feature_sources(joined_rows: list[dict], event_rows: list[dict]) -> list[dict]:
+    """Use packet+endpoint features for joined connections; event fallback for the rest."""
+    joined_connection_ids = {row.get("connection_id") for row in joined_rows}
+    combined = [{**row, "feature_source": "packet-and-server-events"} for row in joined_rows]
+    combined.extend(row for row in event_rows if row.get("connection_id") not in joined_connection_ids)
+    return combined
 
 
 def _register_task(control_port: int, session_id: str, seed: int) -> dict:

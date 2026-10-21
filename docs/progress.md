@@ -68,13 +68,14 @@ This page distinguishes working prototype components from complete requirements 
 
 ## Phases 8–12 — Prototype components and evidence
 
-- Phase 8: added deterministic experiment planning and collection that records every attempt, oracle outcome, lifecycle, costs, event-only features, and dataset manifests. Missing packet capture is recorded as unavailable per episode.
+- Phase 8: added deterministic experiment planning and collection that records every attempt, oracle outcome, lifecycle, costs, packet captures, and dataset manifests. Successful captures are extracted with TShark, joined to server connections, and included as cross-layer features; event-only observations fill in connections without a successful packet join. Capture/extraction/join failures remain recorded in the manifest.
 - Phases 9–10: added an allowlisted event-feature path and session aggregation. It observes negotiated endpoint TLS and endpoint-observed H2 structure; it cannot recover ClientHello offers, TCP SYN details, or raw packet timing. Complete preregistered feature-group ablations and cutoff-aware prefix features remain incomplete.
 - Phase 11: planner requires both browser and browserless sessions in train and validation and rejects browserless-family overlap. `configs/development_experiment.json` schedules 40 local episodes: Firefox in both partitions, stdlib browserless in train, and curl-cffi Chrome impersonation in validation. A third independent family is reserved and not collected.
 - Phase 12: added optional scikit-learn logistic regression and random forest pipelines, preprocessing fit on train only, validation-only cutoff selection under a configurable browser FPR cap, and hashed joblib bundles. The final test partition is not opened by this command. Any validation figures are development estimates only.
 - Collected the configured 40 sessions: 40/40 task-oracle successes, 40 matched feature rows, 20 train and 20 validation. All 40 packet captures failed on host capture permissions; the dataset is event-only. `split-manifest.json`, `fidelity-report.json`, and a report of this pilot were saved. The reserved test family was not collected or opened.
 - Logistic regression and random forest each classified the 20 validation rows correctly at the chosen validation threshold (10/10 in each class). The result is only a pipeline smoke test on one held-out impersonation profile and a tiny dataset; do not report this as detector performance.
 - Model artifacts are ignored under `artifacts/models/local-dev-cross-layer-v1/`; they include hashed joblib bundles and validation prediction CSVs. The model score round-trip and feature-order guard are tested.
+- Follow-up after the local pilot: the orchestrator was connected to the existing TShark extraction and tuple/time join functions so a future permission-enabled collection will actually feed PCAP-derived features into the dataset. The prior 40-run dataset remains event-only; this integration still needs a successful host capture run to validate it end to end.
 
 ## Verification run on 2026-10-22
 
