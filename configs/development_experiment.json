@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "experiment_id": "local-dev-cross-layer-v1",
+  "seed": 20261022,
+  "task_id": "catalog-search-detail-save-v1",
+  "origin": "https://localhost:8443",
+  "ca_file": "local/tls/ca.pem",
+  "task_deadline_seconds": 45,
+  "capture_seconds": 5,
+  "repeats_per_client_partition": 10,
+  "clients": [
+    {
+      "name": "firefox-headless",
+      "adapter": "firefox",
+      "client_family": "mozilla-firefox",
+      "execution_stack": "browser",
+      "controller": "script",
+      "partitions": ["train", "validation"]
+    },
+    {
+      "name": "python-stdlib",
+      "adapter": "stdlib",
+      "client_family": "python-stdlib",
+      "execution_stack": "browserless",
+      "controller": "script",
+      "partitions": ["train"]
+    },
+    {
+      "name": "curl-cffi-chrome150",
+      "adapter": "curl-cffi",
+      "client_family": "curl-impersonate",
+      "execution_stack": "browserless",
+      "controller": "script",
+      "profile": "chrome150",
+      "partitions": ["validation"]
+    }
+  ],
+  "reserved_test": {
+    "status": "reserved-not-collected",
+    "client_family": "family-c-independent-adapter-required",
+    "execution_stack": "browserless",
+    "browser_negatives_required": true
+  }
+}

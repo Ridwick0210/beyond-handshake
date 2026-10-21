@@ -80,6 +80,8 @@ def _doctor(output: Path | None) -> int:
         "http2": _module_available("h2"),
         "browser": {"chrome": shutil.which("google-chrome"),
                     "chromium": shutil.which("chromium"),
+                    "firefox": shutil.which("firefox") or
+                               ("/usr/lib64/firefox/firefox" if Path("/usr/lib64/firefox/firefox").is_file() else None),
                     "playwright": _module_available("playwright")},
         "curl_cffi": _module_available("curl_cffi"),
         "git_commit": _git_commit(),
@@ -172,7 +174,7 @@ def _task(args: argparse.Namespace) -> int:
 
 def _capture(args: argparse.Namespace) -> int:
     from beyond_handshake.capture import (capture_loopback, discover_capture_tools,
-        join_and_aggregate, tshark_extract)
+        features_from_server_events, join_and_aggregate, tshark_extract)
 
     if args.capture_command == "doctor":
         result = discover_capture_tools()
@@ -185,6 +187,10 @@ def _capture(args: argparse.Namespace) -> int:
         return 0
     if args.capture_command == "join":
         result = join_and_aggregate(args.packets, args.events, args.output)
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.capture_command == "events":
+        result = features_from_server_events(args.events, args.output)
         print(json.dumps(result, indent=2))
         return 0
     expected_port = load_server_config(_project_root() / "configs" / "server.toml").listen_port
@@ -211,9 +217,36 @@ def _dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _experiment(args: argparse.Namespace) -> int:
+    from beyond_handshake.experiment import collect_plan, plan_experiment
+
+    if args.experiment_command == "plan":
+        result = plan_experiment(args.config, args.output)
+    else:
+        result = collect_plan(args.plan, args.output_dir, args.server_config)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _model(args: argparse.Namespace) -> int:
+    from beyond_handshake.modeling import train_baselines
+
+    result = train_baselines(args.dataset_dir, args.output_dir, args.max_validation_fpr)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _fidelity(args: argparse.Namespace) -> int:
+    from beyond_handshake.fidelity import fidelity_report
+
+    result = fidelity_report(args.features, args.labels, args.output)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def _client(args: argparse.Namespace) -> int:
     from beyond_handshake.client import (available_impersonation_profiles, run_curl_cffi,
-                                         run_stdlib, write_attempt)
+                                         run_firefox, run_stdlib, write_attempt)
 
     if args.client_command == "profiles":
         try:
@@ -238,6 +271,9 @@ def _client(args: argparse.Namespace) -> int:
         if args.adapter == "stdlib":
             result = run_stdlib(args.session_id, args.origin, args.ca_file,
                                 args.timeout, args.control_port)
+        elif args.adapter == "firefox":
+            result = run_firefox(args.session_id, args.origin, args.ca_file,
+                                 args.timeout, args.control_port)
         else:
             if not args.profile:
                 print("--profile is required for the curl-cffi adapter", file=sys.stderr)
@@ -256,7 +292,7 @@ def _client(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bh",
-        description="Local controlled browser-stack measurement prototype (Phases 0–7 pilot components).",
+        description="Controlled browser-stack measurement prototype and research pipeline (Phases 0–12 components).",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     doctor = commands.add_parser("doctor", help="inspect local runtime prerequisites")
@@ -289,6 +325,9 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("--packets", type=Path, required=True)
     join.add_argument("--events", type=Path, required=True)
     join.add_argument("--output", type=Path, required=True)
+    event_features = capture_commands.add_parser("events", help="extract event-only features without packet capture")
+    event_features.add_argument("--events", type=Path, required=True)
+    event_features.add_argument("--output", type=Path, required=True)
     capture_run = capture_commands.add_parser("loopback", help="capture only TCP traffic to the local task port")
     capture_run.add_argument("--port", type=int, default=8443)
     capture_run.add_argument("--seconds", type=float, required=True)
@@ -302,7 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--ca-file", type=Path, default=Path("local/tls/ca.pem"))
     run_client = client_commands.add_parser("run", help="run a task through a declared trusted adapter")
     run_client.add_argument("session_id")
-    run_client.add_argument("--adapter", choices=["stdlib", "curl-cffi"], default="curl-cffi")
+    run_client.add_argument("--adapter", choices=["stdlib", "curl-cffi", "firefox"], default="curl-cffi")
     run_client.add_argument("--profile")
     run_client.add_argument("--origin", default="https://localhost:8443")
     run_client.add_argument("--ca-file", type=Path, default=Path("local/tls/ca.pem"))
@@ -318,6 +357,25 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate = dataset_commands.add_parser("evaluate", help="fit train-only baseline and score held-out families")
     evaluate.add_argument("--dataset-dir", type=Path, required=True)
     evaluate.add_argument("--output", type=Path, required=True)
+    experiment = commands.add_parser("experiment", help="plan and collect reproducible local episodes")
+    experiment_commands = experiment.add_subparsers(dest="experiment_command", required=True)
+    plan = experiment_commands.add_parser("plan", help="create a deterministic train/validation schedule")
+    plan.add_argument("--config", type=Path, required=True)
+    plan.add_argument("--output", type=Path, required=True)
+    collect = experiment_commands.add_parser("collect", help="execute a plan against the running localhost server")
+    collect.add_argument("--plan", type=Path, required=True)
+    collect.add_argument("--output-dir", type=Path, default=Path("data/interim"))
+    collect.add_argument("--server-config", type=Path, default=Path("configs/server.toml"))
+    model = commands.add_parser("model", help="train transparent Phase 12 baselines using train/validation only")
+    model_commands = model.add_subparsers(dest="model_command", required=True)
+    train = model_commands.add_parser("train", help="fit models and freeze validation-selected thresholds")
+    train.add_argument("--dataset-dir", type=Path, required=True)
+    train.add_argument("--output-dir", type=Path, required=True)
+    train.add_argument("--max-validation-fpr", type=float, default=0.05)
+    fidelity = commands.add_parser("fidelity", help="write an honest protocol-observation comparison")
+    fidelity.add_argument("--features", type=Path, required=True)
+    fidelity.add_argument("--labels", type=Path, required=True)
+    fidelity.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -339,6 +397,12 @@ def main() -> int:
             return _client(args)
         if args.command == "dataset":
             return _dataset(args)
+        if args.command == "experiment":
+            return _experiment(args)
+        if args.command == "model":
+            return _model(args)
+        if args.command == "fidelity":
+            return _fidelity(args)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     return 2

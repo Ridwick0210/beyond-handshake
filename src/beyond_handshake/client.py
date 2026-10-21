@@ -5,8 +5,13 @@ from __future__ import annotations
 import http.client
 import html.parser
 import json
+import hashlib
 import platform
+import shutil
 import ssl
+import subprocess
+import tempfile
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -218,6 +223,107 @@ def run_stdlib(session_id: str, origin: str, ca_file: Path, timeout_seconds: flo
     return attempt
 
 
+def run_firefox(session_id: str, origin: str, ca_file: Path, timeout_seconds: float,
+                control_port: int | None = None) -> ExecutionResult:
+    """Run a pinned local Firefox binary with an isolated profile and per-profile lab CA trust."""
+    _validate_local_origin(origin, ca_file)
+    binary = shutil.which("firefox")
+    if not binary:
+        raise RuntimeError("Firefox is not installed")
+    source_root = _firefox_install_root(binary)
+    source_executable = source_root / "firefox"
+    version = subprocess.run([str(source_executable), "--version"], capture_output=True, text=True, timeout=10)
+    if version.returncode:
+        raise RuntimeError(f"could not query Firefox version: {version.stderr[-500:]}")
+    started = time.time_ns()
+    attempt = ExecutionResult(uuid.uuid4().hex, session_id, "firefox-headless",
+                              version.stdout.strip(), "mozilla-firefox", "Mozilla Firefox / NSS / Gecko",
+                              None, version.stdout.strip(), "script", started, started, False)
+    browser_url = origin.rstrip("/") + f"/s/{session_id}/start#autotask"
+    process = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="bh-firefox-profile-") as directory:
+            temporary_root = Path(directory)
+            install = temporary_root / "firefox-install"
+            shutil.copytree(source_root, install, copy_function=_link_or_copy, symlinks=True)
+            profile = temporary_root / "profile"
+            profile.mkdir()
+            policy_dir = install / "distribution"
+            policy_dir.mkdir(exist_ok=True)
+            policy_dir.chmod(policy_dir.stat().st_mode | 0o700)
+            policy = {"policies": {"Certificates": {"Install": [str(ca_file.resolve())]}}}
+            (policy_dir / "policies.json").write_text(json.dumps(policy), encoding="utf-8")
+            environment = dict(__import__("os").environ)
+            environment["MOZ_HEADLESS"] = "1"
+            install_executable = install / "firefox"
+            process = subprocess.Popen([str(install_executable), "--headless", "--no-remote", "--new-instance",
+                                        "--profile", str(profile), browser_url],
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE, text=True, env=environment)
+            endpoint_port = int(urllib.parse.urlsplit(origin).port or 443)
+            admin_port = control_port or endpoint_port + 1
+            deadline = time.monotonic() + timeout_seconds
+            last_error = None
+            try:
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        details = process.stderr.read()[-1000:] if process.stderr else ""
+                        raise RuntimeError(f"Firefox exited early ({process.returncode}): {details}")
+                    try:
+                        outcome = read_task_outcome(session_id, admin_port)
+                        if outcome.get("task_success"):
+                            attempt.task_success = True
+                            attempt.observed_protocol = "see server connection events"
+                            attempt.steps.append({"route": "oracle", "state": outcome.get("state")})
+                            break
+                    except (OSError, urllib.error.URLError):
+                        last_error = "control plane not reachable yet"
+                    time.sleep(0.25)
+                else:
+                    raise TimeoutError(f"Firefox task timed out; last control status: {last_error}")
+            finally:
+                _stop_process(process)
+    except Exception as exc:
+        attempt.failure_category = _failure_category(exc)
+        attempt.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        if process is not None:
+            _stop_process(process)
+        attempt.end_wall_ns = time.time_ns()
+    attempt.steps.append({"firefox_binary_sha256": _file_sha256(source_executable),
+                          "profile_isolation": "temporary; removed on exit",
+                          "lab_ca_trust": "temporary install-tree enterprise policy"})
+    return attempt
+
+
+def _firefox_install_root(launcher: str) -> Path:
+    candidates = [Path(launcher).resolve().parent / "../lib64/firefox",
+                  Path("/usr/lib64/firefox"), Path("/usr/lib/firefox")]
+    for candidate in candidates:
+        root = candidate.resolve()
+        if (root / "application.ini").is_file() and (root / "firefox").is_file():
+            return root
+    raise RuntimeError("could not locate Firefox application directory (application.ini)")
+
+
+def _link_or_copy(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
+
+
+def _stop_process(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+
+
 def _stdlib_request(connection: http.client.HTTPSConnection, method: str, path: str,
                     deadline: float, body: bytes | None = None,
                     headers: dict[str, str] | None = None) -> _Response:
@@ -312,3 +418,11 @@ def write_attempt(result: ExecutionResult, output_dir: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(result), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

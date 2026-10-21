@@ -39,7 +39,7 @@ class DatasetTests(unittest.TestCase):
             joined.write_text(json.dumps({"session_ids": ["a"], "features": {"x": 1}}) + "\n")
             labels = root / "labels.json"
             labels.write_text(json.dumps([
-                {"session_id": "a", "execution_stack": "browser", "client_family": "same", "partition": "train"},
+                {"session_id": "a", "execution_stack": "browserless", "client_family": "same", "partition": "train"},
                 {"session_id": "b", "execution_stack": "browserless", "client_family": "same", "partition": "test"},
             ]))
             with self.assertRaisesRegex(ValueError, "cross partitions"):

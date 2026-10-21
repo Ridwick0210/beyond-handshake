@@ -4,13 +4,14 @@ A local prototype for studying which server-observable network signals distingui
 
 ## Current status
 
-The local pilot now supports TLS with HTTP/1.1 and HTTP/2, bounded JSONL events, ordered structural H2 frame/SETTINGS observation, a deterministic catalog task with an oracle, HTTP/1.1 and optional `curl_cffi` runners, plus an implemented packet extraction, flow joining, dataset assembly, and baseline evaluation pipeline. TShark/dumpcap are missing on the current host, so packet stages are fixture-tested but not validated on real captures. A real browser, multi-language adapters, and research evaluation are not available. Pilot logs are development artifacts, not research data.
+Prototype components now cover Phases 0–12: TLS/HTTP1/H2 server, event logging, a deterministic task oracle, stdlib/curl-cffi/headless Firefox clients, packet extraction/join code, event-only feature extraction, experiment planning/collection, grouped train/validation splits, and transparent model training. TShark 4.6.9 is installed, but loopback capture is blocked by this environment's permissions (`CAP_NET_RAW`/interface access); therefore no real PCAP-based model or research result exists. Firefox was exercised successfully. Pilot logs and the local dataset are development artifacts, not representative research data; the final test family remains reserved.
 
 ## Requirements
 
 - Python 3.12 or newer. The current development host has Python 3.14.
 - OpenSSL CLI for local certificate generation.
 - `h2==4.4.1` is required for HTTP/2. `curl-cffi==0.16.3` is optional for the impersonation adapter.
+- Optional `ml` extra provides scikit-learn/joblib for Phase 12 baseline bundles.
 
 Install the locked core and optional impersonation dependencies with `uv sync --locked --extra impersonation` when package access is available. The server remains local-only; no detection model or research finding is included.
 
@@ -50,7 +51,7 @@ The separate HTTP control plane listens on loopback port `8444`. Register a dete
 
 The register command prints the session ID. Use a new session ID for every attempt. The `curl_cffi` profile name is validated against the installed package at runtime; its profile label is a client configuration, not proof of an actual Chrome browser. `./scripts/bh client manual <session-id>` prints a URL for human completion.
 
-`./scripts/bh capture doctor` reports whether `dumpcap` and `tshark` are available. If `dumpcap` is installed, `./scripts/bh capture loopback --seconds 30` records only TCP traffic for the configured local task port on interface `lo`. Packet extraction and analysis commands are implemented but need TShark to run on real captures:
+`./scripts/bh capture doctor` reports TShark fields and whether loopback capture works in the current environment. On this host TShark is installed, but interface/raw-socket permissions block capture. Packet extraction and analysis commands are implemented; capture validation needs a host with authorized loopback capture:
 
 ```sh
 ./scripts/bh capture extract --pcap local/captures/run.pcapng --output local/derived/packets.tsv
@@ -60,6 +61,18 @@ The register command prints the session ID. Use a new session ID for every attem
 ```
 
 The label registry is separate JSON metadata with `session_id`, `execution_stack` (`browser` or `browserless`), `client_family`, and a preassigned `partition` (`train`, `validation`, or `test`). The builder rejects client families assigned to multiple partitions and writes feature and label CSVs separately. The evaluator compares TLS-only, TLS-plus-HTTP/2, and full feature groups on the same held-out rows using a categorical Naive Bayes engineering baseline; it does not replace preregistered model selection, uncertainty analysis, or external validation.
+
+The development schedule and Phase 12 training commands are:
+
+```sh
+uv sync --locked --extra impersonation --extra ml
+./scripts/bh experiment plan --config configs/development_experiment.json --output data/interim/dev-plan.json
+./scripts/bh experiment collect --plan data/interim/dev-plan.json --output-dir data/interim
+./scripts/bh model train --dataset-dir data/interim/local-dev-cross-layer-v1/dataset --output-dir artifacts/models/local-dev-v1
+./scripts/bh fidelity --features data/interim/local-dev-cross-layer-v1/dataset/features.csv --labels data/interim/local-dev-cross-layer-v1/labels.json --output artifacts/evaluations/fidelity.json
+```
+
+These commands produce local development artifacts only. A successful run does not establish generalization, and the final test family is not collected by the planner.
 
 The CA and key files are private local development material under ignored `local/`. The server listens on `127.0.0.1` and only accepts the configured `Host` values. It does not need or request administrator access. To use a browser, import `local/tls/ca.pem` as a trusted authority in a **dedicated temporary browser profile**. Do not install the lab CA in the system-wide trust store. Remove the profile and CA when finished.
 

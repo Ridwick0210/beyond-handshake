@@ -41,7 +41,7 @@ a{color:var(--accent)}code{color:#fff;background:#202b42;padding:.12em .4em;bord
 <section class="grid"><article><b>Transport</b><p>Loopback HTTPS endpoint with TLS 1.2+ and negotiated HTTP/1.1 or HTTP/2.</p></article>
 <article><b>Observation</b><p>Ordered, redacted request headers plus structural HTTP/2 frame and SETTINGS events.</p></article>
 <article><b>Shared workload</b><p>Deterministic local catalog task with a server-side success oracle for both protocols.</p></article></section>
-<p class="status">Prototype only: no detector, packet-level TCP/TLS extraction, real-browser runner, or research result exists. This project classifies client stacks, not AI identity or intent. <a href="/healthz">Health check</a></p>
+<p class="status">Local research prototype. It records network-stack observations and does not infer AI identity or intent. <a href="/healthz">Health check</a></p>
 </main></body></html>""".encode("utf-8")
 
 
@@ -144,7 +144,14 @@ class TaskOracle:
                   "const r=await fetch(u);const j=await r.json();const box=document.querySelector('#result');"
                   "box.replaceChildren();for(const item of j.items||[]){const a=document.createElement('a');a.href=item.url;a.textContent=item.name;box.append(a)}});"
                   "const save=document.querySelector('#save');if(save)save.addEventListener('submit',async e=>{e.preventDefault();"
-                  "await fetch(save.action,{method:'POST',body:new FormData(save)});location.href=save.dataset.complete});")
+                  "const data=new URLSearchParams(new FormData(save));await fetch(save.action,{method:'POST',body:data,"
+                  "headers:{'Content-Type':'application/x-www-form-urlencoded'}});location.href=save.dataset.complete});"
+                  "if(location.hash==='#autotask'){(async()=>{if(search){const q=document.querySelector('b')?.textContent||'';"
+                  "const u=new URL(search.action,location.href);u.search=new URLSearchParams({q});const r=await fetch(u);"
+                  "const j=await r.json();if(j.items?.length===1)location.href=j.items[0].url+'#autotask';}"
+                  "else if(save){const data=new URLSearchParams(new FormData(save));await fetch(save.action,{method:'POST',body:data,"
+                  "headers:{'Content-Type':'application/x-www-form-urlencoded'}});"
+                  "location.href=save.dataset.complete;}})().catch(console.error);}")
             return 200, js.encode(), "text/javascript", "asset_js"
         if method == "GET" and path == "/assets/large.bin":
             return 200, LARGE_ASSET, "application/octet-stream", "asset_large"

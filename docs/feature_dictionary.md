@@ -1,6 +1,6 @@
 # Initial feature dictionary
 
-**Schema:** `cross-layer/1` (connection observations), with packet rows tagged `packet-observations/1`.
+**Schema:** `cross-layer/1` (connection observations), packet rows tagged `packet-observations/1`, and event-only rows tagged `event-features/1`.
 
 The extractor uses only fields present in `tshark -G fields` on the installed build and records that build's version. Missing fields are omitted from the packet table. The connection aggregator emits a fixed schema with null/empty values where evidence is absent. It never uses label-registry columns as predictors.
 
@@ -28,11 +28,15 @@ The extractor uses only fields present in `tshark -G fields` on the installed bu
 
 `session_id`, `connection_id`, `tcp_stream`, addresses, ports, timestamps, family, execution stack, controller, task outcome, and capture-quality statuses are identifiers/metadata, not predictors. The join report retains connection IDs for auditing in a separate file. Keep raw captures private and preserve their checksums.
 
+## Current event-only dataset
+
+The collected development dataset has no packet-derived features because this host's capture capability is blocked. Its `endpoint_tls_version` and `endpoint_alpn` are negotiated values from the server; the H2 settings, frame types, request count, and header-name order come from the server observer. TLS ClientHello offers and TCP features are unavailable. The model trainer drops numeric columns that are entirely missing from train and records them in `excluded_unobserved_features`.
+
 ## Known measurement limits
 
-- TShark fields vary by version and dissector preferences. The current host has no TShark, so actual field availability and ClientHello extraction remain unverified.
+- TShark fields vary by version and dissector preferences. The current host has TShark 4.6.9 and its field inventory was read, but actual extraction from a real captured PCAP remains unverified because packet capture lacks permission.
 - TLS 1.3 handshake bytes after ServerHello are encrypted in ordinary passive captures. Selected TLS version/cipher/ALPN are server-side negotiated fields; they are not offered-list features.
 - TShark's standard field output does not preserve arbitrary TCP option presence/order in every build. `tcp.options.kind` is used only when available and must be validated against packet bytes/Wireshark before research use.
 - This first extractor does not export TShark expert diagnostics, capture-drop counters, retransmission rates, JA3/JA4 hashes, or server-certificate features.
 - The tuple/time join uses server-side peer tuple and event wall time. It is limited to matching capture/socket vantage and synchronized host clock; ambiguous/missing joins are excluded and listed in the report.
-- The categorical Naive Bayes command is only a smoke-test baseline. It treats each observed serialized value categorically and does not provide calibrated probabilities, intervals, grouped cross-validation, feature ablations, or model selection.
+- The categorical Naive Bayes command is an engineering test baseline. The Phase 12 logistic and forest bundles use train-fitted transforms and validation-selected thresholds, but this 40-session local development cohort is far too small to estimate generalization or confidence intervals. Their validation scores must not be presented as detector performance.

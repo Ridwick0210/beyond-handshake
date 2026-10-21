@@ -13,6 +13,7 @@ import time
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 
 def parse_tshark_field_inventory(text: str) -> list[dict[str, str]]:
@@ -29,20 +30,42 @@ def parse_tshark_field_inventory(text: str) -> list[dict[str, str]]:
 def discover_capture_tools() -> dict:
     tshark = shutil.which("tshark")
     dumpcap = shutil.which("dumpcap")
-    result = {"tshark": tshark, "dumpcap": dumpcap, "loopback_capture_supported": False,
+    tcpdump = shutil.which("tcpdump")
+    result = {"tshark": tshark, "dumpcap": dumpcap, "tcpdump": tcpdump,
+              "loopback_capture_supported": False,
               "field_inventory_count": 0, "missing": []}
-    if not dumpcap:
-        result["missing"].append("dumpcap is not installed")
-    else:
-        interfaces = subprocess.run([dumpcap, "-D"], capture_output=True, text=True, timeout=10)
-        result["interfaces_exit_code"] = interfaces.returncode
-        result["interfaces"] = interfaces.stdout.splitlines()
-        result["loopback_capture_supported"] = interfaces.returncode == 0 and any(
-            "loopback" in line.lower() or re.search(r"(^|[ .(])lo([ .)]|$)", line) is not None
-            for line in interfaces.stdout.splitlines()
-        )
-        if interfaces.returncode:
-            result["missing"].append("dumpcap cannot enumerate capture interfaces with current permissions")
+    if dumpcap:
+        try:
+            interfaces = subprocess.run([dumpcap, "-D"], capture_output=True, text=True, timeout=10)
+        except OSError as exc:
+            result["dumpcap_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            result["interfaces_exit_code"] = interfaces.returncode
+            result["interfaces"] = interfaces.stdout.splitlines()
+            result["loopback_capture_supported"] = interfaces.returncode == 0 and any(
+                "loopback" in line.lower() or re.search(r"(^|[ .(])lo([ .)]|$)", line) is not None
+                for line in interfaces.stdout.splitlines()
+            )
+            if interfaces.returncode:
+                result["dumpcap_error"] = interfaces.stderr.strip()[-500:]
+    if not result["loopback_capture_supported"] and tcpdump:
+        try:
+            interfaces = subprocess.run([tcpdump, "-D"], capture_output=True, text=True, timeout=10)
+        except OSError as exc:
+            result["tcpdump_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            result["tcpdump_interfaces_exit_code"] = interfaces.returncode
+            result["tcpdump_interfaces"] = interfaces.stdout.splitlines()
+            result["loopback_capture_supported"] = interfaces.returncode == 0 and any(
+                re.search(r"(^|[ .(])lo([ .)]|$)", line) is not None for line in interfaces.stdout.splitlines())
+            if result["loopback_capture_supported"]:
+                result["capture_backend"] = "tcpdump"
+            elif interfaces.returncode:
+                result["tcpdump_error"] = interfaces.stderr.strip()[-500:]
+    if not dumpcap and not tcpdump:
+        result["missing"].append("dumpcap and tcpdump are not installed")
+    elif not result["loopback_capture_supported"]:
+        result["missing"].append("no capture tool can enumerate loopback with current permissions")
     if not tshark:
         result["missing"].append("tshark is not installed; no packet extraction is available")
     else:
@@ -63,17 +86,23 @@ def capture_loopback(port: int, seconds: float, output_dir: Path) -> dict:
         raise ValueError("port must be between 1 and 65535")
     if not 0 < seconds <= 3600:
         raise ValueError("seconds must be in (0, 3600]")
-    dumpcap = shutil.which("dumpcap")
-    if not dumpcap:
-        raise RuntimeError("dumpcap is unavailable; install Wireshark's capture tool first")
+    tools = discover_capture_tools()
+    backend = tools.get("capture_backend")
+    binary = shutil.which(backend or "dumpcap")
+    if not binary or not tools.get("loopback_capture_supported"):
+        raise RuntimeError("no loopback capture backend is available with current permissions")
     # Disallow collecting arbitrary interfaces through this initial local pilot command.
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    capture_path = output_dir / f"loopback-{stamp}.pcapng"
-    stderr_path = output_dir / f"loopback-{stamp}.dumpcap.stderr.log"
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    capture_path = output_dir / f"loopback-{stamp}-{uuid4().hex[:6]}.pcapng"
+    stderr_path = output_dir / f"loopback-{stamp}-{uuid4().hex[:6]}.capture.stderr.log"
     stderr_file = stderr_path.open("wb")
-    args = [dumpcap, "-i", "lo", "-f", f"tcp port {port}", "-w", str(capture_path), "-q"]
+    if backend == "tcpdump":
+        args = [binary, "-i", "lo", "-n", "-s", "0", "-U", "-w", str(capture_path),
+                f"tcp port {port}"]
+    else:
+        args = [binary, "-i", "lo", "-f", f"tcp port {port}", "-w", str(capture_path), "-q"]
     process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=stderr_file, close_fds=True)
     try:
@@ -114,7 +143,7 @@ def capture_loopback(port: int, seconds: float, output_dir: Path) -> dict:
         digest = hasher.hexdigest()
     return {"capture_path": str(capture_path), "stderr_path": str(stderr_path),
             "sha256": digest, "exit_code": process.returncode,
-            "interface": "lo", "capture_filter": f"tcp port {port}",
+            "interface": "lo", "capture_filter": f"tcp port {port}", "capture_backend": backend or "dumpcap",
             "duration_seconds": seconds, "status": "captured" if digest else "failed"}
 
 
@@ -329,3 +358,37 @@ def _inbound_frame_types(events: list[dict], conn_id: str) -> list:
     return [e.get("payload", {}).get("frame_type") for e in events
             if e.get("connection_id") == conn_id and e.get("event_type") == "http2.frame"
             and e.get("payload", {}).get("direction") == "in"]
+
+
+def features_from_server_events(events_path: Path, output_path: Path) -> dict:
+    """Build explicitly event-only features when packet capture is unavailable."""
+    events = []
+    with events_path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip():
+                events.append(json.loads(line))
+    opens = [event for event in events if event.get("event_type") == "connection.open"]
+    rows = []
+    for opened in opens:
+        connection_id = opened.get("connection_id")
+        payload = opened.get("payload", {})
+        session_ids = sorted({event.get("session_id") for event in events
+                              if event.get("connection_id") == connection_id and event.get("session_id")})
+        if len(session_ids) > 1:
+            continue
+        rows.append({"connection_id": connection_id, "session_ids": session_ids,
+                     "feature_source": "server-events-only", "features": {
+                         "feature_schema": "cross-layer/1",
+                         "endpoint_tls_version": payload.get("tls_version"),
+                         "endpoint_alpn": payload.get("tls_alpn"),
+                         "h2_inbound_settings_order": _settings_values(events, connection_id),
+                         "h2_inbound_frame_types": _inbound_frame_types(events, connection_id),
+                         "h2_header_names_order": _header_values(events, connection_id),
+                         "h2_request_count": _h2_request_count(events, connection_id)}})
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+    return {"schema_version": "event-features/1", "feature_source": "server-events-only",
+            "connection_count": len(rows), "matched_session_connection_count": sum(bool(r["session_ids"]) for r in rows),
+            "events_sha256": _sha256(events_path), "features_sha256": _sha256(output_path),
+            "features_path": str(output_path),
+            "limitations": ["no TCP or packet-derived ClientHello features", "HTTP/2 features only when endpoint observer remained healthy"]}

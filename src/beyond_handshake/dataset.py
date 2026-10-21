@@ -39,11 +39,19 @@ def build_dataset(features_jsonl: Path, labels_json: Path, output_dir: Path) -> 
         if not label.get("client_family") or label.get("partition") not in {"train", "validation", "test"}:
             raise ValueError(f"{sid}: client_family and train/validation/test partition are required")
     family_partitions = defaultdict(set)
+    group_partitions = defaultdict(set)
     for row in labels.values():
-        family_partitions[row["client_family"]].add(row["partition"])
+        if row["execution_stack"] == "browserless":
+            family_partitions[row["client_family"]].add(row["partition"])
+        for group_name in ("participant_id", "profile_group_id", "capture_block_id", "pair_id"):
+            if row.get(group_name):
+                group_partitions[(group_name, row[group_name])].add(row["partition"])
     split_leaks = [family for family, parts in family_partitions.items() if len(parts) > 1]
     if split_leaks:
-        raise ValueError(f"client families cross partitions: {split_leaks}")
+        raise ValueError(f"browserless client families cross partitions: {split_leaks}")
+    group_leaks = [key for key, parts in group_partitions.items() if len(parts) > 1]
+    if group_leaks:
+        raise ValueError(f"dependent groups cross partitions: {group_leaks}")
     per_session = defaultdict(list)
     for line in features_jsonl.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
@@ -68,7 +76,11 @@ def build_dataset(features_jsonl: Path, labels_json: Path, output_dir: Path) -> 
         label_rows.append({"session_id": sid, "client_family": label["client_family"],
                            "execution_stack": label["execution_stack"], "partition": label["partition"],
                            "controller": label.get("controller", "unknown"),
-                           "task_id": label.get("task_id", "unknown")})
+                           "task_id": label.get("task_id", "unknown"),
+                           "participant_id": label.get("participant_id", ""),
+                           "profile_group_id": label.get("profile_group_id", ""),
+                           "capture_block_id": label.get("capture_block_id", ""),
+                           "pair_id": label.get("pair_id", "")})
     if not feature_rows:
         raise ValueError("no sessions in labels matched joined feature rows")
     _write_csv(output_dir / "features.csv", feature_rows)
@@ -112,10 +124,17 @@ def evaluate_naive_bayes(dataset_dir: Path, output: Path) -> dict:
     train = [r for r in labels if r["partition"] == "train"]
     test = [r for r in labels if r["partition"] == "test"]
     family_partitions = defaultdict(set)
+    group_partitions = defaultdict(set)
     for row in labels:
-        family_partitions[row["client_family"]].add(row["partition"])
+        if row["execution_stack"] == "browserless":
+            family_partitions[row["client_family"]].add(row["partition"])
+        for group_name in ("participant_id", "profile_group_id", "capture_block_id", "pair_id"):
+            if row.get(group_name):
+                group_partitions[(group_name, row[group_name])].add(row["partition"])
     if any(len(parts) > 1 for parts in family_partitions.values()):
-        raise ValueError("client family leakage across partitions")
+        raise ValueError("browserless client family leakage across partitions")
+    if any(len(parts) > 1 for parts in group_partitions.values()):
+        raise ValueError("dependent group leakage across partitions")
     if not train or not test or {r["execution_stack"] for r in train} != {"browser", "browserless"}:
         raise ValueError("need train and test rows, and both execution_stack classes in train")
     comparisons, full_predictions = {}, []
