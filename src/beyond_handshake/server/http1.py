@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import socket
 import ssl
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,7 +13,9 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from beyond_handshake.config import ServerConfig
+from beyond_handshake.control import ControlServer
 from beyond_handshake.event_writer import EventWriter
+from beyond_handshake.tasks import TaskOracle
 
 LOGGER = logging.getLogger("beyond_handshake.server")
 _SESSION_ROUTE = re.compile(r"^/s/([A-Za-z0-9_-]{1,80})(?:/|$)")
@@ -38,9 +39,10 @@ class LocalHTTPServer(ThreadingHTTPServer):
     request_queue_size = 32
 
     def __init__(self, address: tuple[str, int], config: ServerConfig, context: ssl.SSLContext,
-                 events: EventWriter) -> None:
+                 events: EventWriter, tasks: TaskOracle) -> None:
         self.config = config
         self.events = events
+        self.tasks = tasks
         self.ssl_context = context
         super().__init__(address, RequestHandler, bind_and_activate=True)
 
@@ -100,6 +102,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def handle(self) -> None:
         if not self._setup_failed:
+            if self.connection.selected_alpn_protocol() == "h2":
+                from beyond_handshake.server.h2_protocol import serve_h2
+
+                serve_h2(self)
+                return
             super().handle()
 
     def finish(self) -> None:
@@ -127,18 +134,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         LOGGER.info("%s - %s", self.client_address[0], format_string % args)
 
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
-        if not self.connection_id:
-            return
-        self.app_server.events.emit(
-            "http.response",
-            {
-                "status": int(code) if str(code).isdigit() else None,
-                "body_bytes": int(size) if str(size).isdigit() else None,
-            },
-            connection_id=self.connection_id,
-            request_id=getattr(self, "_request_id", None),
-            session_id=getattr(self, "_session_id", None),
-        )
+        del code, size
 
     def send_response(self, code: int, message: str | None = None) -> None:
         """Write the normal server/date headers and defer event logging until body size is known."""
@@ -147,8 +143,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Date", self.date_time_string())
 
     def _send_json(self, status: int, payload: dict[str, Any], *, close: bool = False) -> None:
+        started_ns = time.monotonic_ns()
         body = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         self.send_response(status)
+        self.app_server.events.emit("http.response_headers", {"status": status,
+                                    "body_bytes": len(body), "protocol": "http/1.1"},
+                                    connection_id=self.connection_id,
+                                    request_id=getattr(self, "_request_id", None),
+                                    session_id=getattr(self, "_session_id", None))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -158,7 +160,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if getattr(self, "command", "") != "HEAD":
             self.wfile.write(body)
-        self.log_request(status, len(body))
+        self.wfile.flush()
+        self.app_server.events.emit("http.response_end", {
+            "bytes_emitted": 0 if getattr(self, "command", "") == "HEAD" else len(body),
+            "server_elapsed_ns": time.monotonic_ns() - started_ns,
+        }, connection_id=self.connection_id, request_id=getattr(self, "_request_id", None),
+           session_id=getattr(self, "_session_id", None))
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
         del message, explain
@@ -228,16 +235,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             result.append([name, visible])
         return result
 
-    def _route(self) -> tuple[int, bytes, str]:
-        if self.command == "HEAD" or self.command == "GET":
-            if self.path == "/healthz":
-                return 200, b'{"status":"ok","phase":3,"protocol":"http/1.1"}\n', "application/json"
-            if self.path == "/":
-                return 200, _INDEX_HTML, "text/html; charset=utf-8"
-        if self.command in {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}:
-            return 404, b'{"error":"Route not found"}\n', "application/json"
-        return 405, b'{"error":"Method not allowed"}\n', "application/json"
-
     def _dispatch(self) -> None:
         started_mono = time.monotonic_ns()
         path = self.path
@@ -266,15 +263,18 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._request_id = uuid4().hex
         match = _SESSION_ROUTE.match(parsed_target.path)
         self._session_id = match.group(1) if match else None
+        status, response_body, content_type, task_session, route, transitions = (
+            self.app_server.tasks.handle(self.command, self.path, body)
+        )
+        self._session_id = task_session
         try:
             self.app_server.events.emit(
-                "http.request",
+                "http.request_headers",
                 {
                     "method": self.command,
-                    "route": parsed_target.path,
-                    "http_version": self.request_version,
+                    "normalized_route": route,
+                    "protocol": self.request_version,
                     "headers_ordered": self._header_log(),
-                    "body_bytes": len(body),
                     "request_mono_ns": started_mono,
                     "query_present": bool(parsed_target.query),
                 },
@@ -287,27 +287,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_error(500)
             return
 
-        status, response_body, content_type = self._route()
+        for transition in transitions:
+            self.app_server.events.emit("task.transition", transition,
+                                        connection_id=self.connection_id,
+                                        request_id=self._request_id,
+                                        session_id=self._session_id)
+        self.app_server.events.emit("http.request_end", {"route": route, "body_bytes": len(body)},
+                                    connection_id=self.connection_id, request_id=self._request_id,
+                                    session_id=self._session_id)
         self.send_response(status)
+        self.app_server.events.emit("http.response_headers", {"status": status,
+                                    "body_bytes": len(response_body), "protocol": "http/1.1"},
+                                    connection_id=self.connection_id, request_id=self._request_id,
+                                    session_id=self._session_id)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(response_body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(response_body)
-        elapsed_ns = time.monotonic_ns() - started_mono
-        try:
-            self.app_server.events.emit(
-                "http.request_end",
-                {"status": status, "server_elapsed_ns": elapsed_ns},
-                connection_id=self.connection_id,
-                request_id=self._request_id,
-                session_id=self._session_id,
-            )
-            self.log_request(status, len(response_body))
-        except RuntimeError:
-            LOGGER.exception("measurement event writer failed after response")
-            self.close_connection = True
+        self.wfile.flush()
+        self.app_server.events.emit("http.response_end", {"bytes_emitted": 0 if self.command == "HEAD" else len(response_body),
+                                    "server_elapsed_ns": time.monotonic_ns() - started_mono},
+                                    connection_id=self.connection_id, request_id=self._request_id,
+                                    session_id=self._session_id)
 
     do_GET = _dispatch
     do_HEAD = _dispatch
@@ -316,27 +319,6 @@ class RequestHandler(BaseHTTPRequestHandler):
     do_DELETE = _dispatch
     do_PATCH = _dispatch
     do_OPTIONS = _dispatch
-
-
-_INDEX_HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Beyond Handshake</title><style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#141b2e;--ink:#edf2ff;--muted:#aab5ce;--line:#293450;--accent:#71e2c2}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 85% 0%,#1a3150 0,transparent 38%),var(--bg);color:var(--ink);font:16px/1.6 system-ui,sans-serif}
-main{width:min(900px,calc(100% - 36px));margin:8vh auto}.eyebrow{color:var(--accent);font-size:.78rem;letter-spacing:.16em;text-transform:uppercase}
-h1{font-size:clamp(2.4rem,7vw,5rem);line-height:1.02;letter-spacing:-.045em;margin:.65rem 0 1rem;max-width:760px}
-.lead{max-width:650px;color:var(--muted);font-size:1.12rem}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:36px 0}
-article{background:linear-gradient(145deg,#171f34,#11182a);border:1px solid var(--line);border-radius:16px;padding:20px}
-article b{display:block;color:var(--accent);font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px}
-article p{margin:0;color:var(--muted)}.status{border-top:1px solid var(--line);padding-top:18px;color:var(--muted);font-size:.92rem}
-a{color:var(--accent)}code{color:#fff;background:#202b42;padding:.12em .4em;border-radius:5px}
-</style></head><body><main><div class="eyebrow">Network measurement prototype · Phase 3</div>
-<h1>Beyond the TLS handshake.</h1><p class="lead">A controlled local project exploring what network behavior can reveal when a browserless client tries to resemble a real browser.</p>
-<section class="grid"><article><b>Current endpoint</b><p>HTTPS with TLS terminated here. Requests are recorded as structured, redacted JSONL events.</p></article>
-<article><b>Available protocol</b><p>HTTP/1.1. The TLS session records its negotiated version, cipher, and ALPN selection.</p></article>
-<article><b>Research status</b><p>Prototype only. No detector, HTTP/2 measurement, packet capture, or research result is available yet.</p></article></section>
-<p class="status">Health check: <a href="/healthz">/healthz</a> · Local endpoint intended for controlled development traffic.</p>
-</main></body></html>""".encode("utf-8")
 
 
 def make_ssl_context(config: ServerConfig) -> ssl.SSLContext:
@@ -358,7 +340,8 @@ def make_ssl_context(config: ServerConfig) -> ssl.SSLContext:
     return context
 
 
-def serve(config: ServerConfig, config_sha256: str) -> None:
+def serve(config: ServerConfig, config_sha256: str, source_commit: str | None = None,
+          source_tree_dirty: bool | None = None) -> None:
     context = make_ssl_context(config)
     metadata = {
         "listen_host": config.listen_host,
@@ -366,7 +349,9 @@ def serve(config: ServerConfig, config_sha256: str) -> None:
         "alpn": list(config.tls.alpn),
         "minimum_tls_version": config.tls.minimum_version,
         "server_tls_terminates_connection": True,
-        "phase": 3,
+        "phase": "3-7-local-pilot",
+        "source_commit": source_commit,
+        "source_tree_dirty": source_tree_dirty,
     }
     events = EventWriter(
         config.logging.output_dir,
@@ -374,18 +359,39 @@ def serve(config: ServerConfig, config_sha256: str) -> None:
         config_sha256,
         metadata,
     )
-    server = LocalHTTPServer((config.listen_host, config.listen_port), config, context, events)
-    LOGGER.info(
-        "local prototype listening at https://%s:%d (run_id=%s; HTTP/1.1 only)",
-        config.listen_host,
-        config.listen_port,
-        events.run_id,
-    )
+    from threading import Thread
+
+    tasks = TaskOracle()
+    server: LocalHTTPServer | None = None
+    control: ControlServer | None = None
+    control_thread: Thread | None = None
     try:
+        server = LocalHTTPServer((config.listen_host, config.listen_port), config, context, events, tasks)
+        control = ControlServer(("127.0.0.1", config.control_port), tasks)
+        assert server is not None
+        control_thread = Thread(target=control.serve_forever, name="bh-control-plane", daemon=True)
+        control_thread.start()
+        LOGGER.info(
+            "local prototype listening at https://%s:%d (run_id=%s; ALPN=%s; control=127.0.0.1:%d)",
+            config.listen_host,
+            config.listen_port,
+            events.run_id,
+            ",".join(config.tls.alpn),
+            config.control_port,
+        )
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
         LOGGER.info("shutdown requested")
     finally:
-        server.server_close()
-        events.close()
+        try:
+            if server is not None:
+                server.server_close()
+        finally:
+            if control is not None:
+                if control_thread is not None and control_thread.is_alive():
+                    control.shutdown()
+                control.server_close()
+            if control_thread is not None:
+                control_thread.join(timeout=2)
+            events.close()
         LOGGER.info("run finalized at %s", events.run_dir)

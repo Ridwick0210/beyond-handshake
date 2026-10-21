@@ -37,6 +37,7 @@ class ServerConfig:
     schema_version: str
     listen_host: str
     listen_port: int
+    control_port: int
     allowed_hosts: frozenset[str]
     tls: TLSConfig
     limits: LimitsConfig
@@ -64,7 +65,7 @@ def load_server_config(path: Path) -> ServerConfig:
         raise ValueError("server config must be a TOML table")
     _keys(
         raw,
-        {"schema_version", "listen_host", "listen_port", "allowed_hosts", "tls", "limits", "logging"},
+        {"schema_version", "listen_host", "listen_port", "control_port", "allowed_hosts", "tls", "limits", "logging"},
         "server",
     )
     if raw["schema_version"] != "1.0":
@@ -75,6 +76,11 @@ def load_server_config(path: Path) -> ServerConfig:
         raise ValueError("listen_host must be a non-empty string")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise ValueError("listen_port must be an integer between 1 and 65535")
+    control_port = raw["control_port"]
+    if not isinstance(control_port, int) or isinstance(control_port, bool) or not 1 <= control_port <= 65535:
+        raise ValueError("control_port must be an integer between 1 and 65535")
+    if control_port == port:
+        raise ValueError("control_port must differ from listen_port")
     if host not in {"127.0.0.1", "::1", "localhost"}:
         raise ValueError("listen_host must be loopback; explicit non-local binding is not supported")
 
@@ -93,8 +99,10 @@ def load_server_config(path: Path) -> ServerConfig:
     if tls["minimum_version"] not in {"TLSv1_2", "TLSv1_3"}:
         raise ValueError("minimum_version must be TLSv1_2 or TLSv1_3")
     alpn = tls["alpn"]
-    if alpn != ["http/1.1"]:
-        raise ValueError("Phase 3 supports only the ALPN protocol http/1.1")
+    if not isinstance(alpn, list) or not alpn or any(x not in {"http/1.1", "h2"} for x in alpn):
+        raise ValueError("tls.alpn must contain only http/1.1 and/or h2")
+    if len(set(alpn)) != len(alpn):
+        raise ValueError("tls.alpn must not contain duplicates")
     keylog_raw = tls["keylog_path"]
     if not isinstance(keylog_raw, str):
         raise ValueError("tls.keylog_path must be an empty string or a relative/absolute path")
@@ -132,6 +140,7 @@ def load_server_config(path: Path) -> ServerConfig:
         schema_version="1.0",
         listen_host=host,
         listen_port=port,
+        control_port=control_port,
         allowed_hosts=allowed_hosts,
         tls=TLSConfig(
             cert=(config_dir / tls["cert"]).resolve(),

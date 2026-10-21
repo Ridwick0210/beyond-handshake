@@ -1,6 +1,6 @@
 # Initial experiment protocol
 
-**Version:** draft 0.1 · 21 October 2026 · **Status:** development protocol only
+**Version:** draft 0.2 · 22 October 2026 · **Status:** development protocol only
 
 ## Research question
 
@@ -15,13 +15,11 @@ Which server-observable signals remain useful for distinguishing browserless aut
 
 ## Initial design
 
-The first prototype serves a local HTTPS endpoint that terminates TLS itself. It supports HTTP/1.1 only. The endpoint logs connection metadata, ordered request header names, normalized routes, status, and server-side request timings. Values of sensitive headers are redacted by default. The server binds to loopback and uses a locally generated CA trusted explicitly by the client.
-
-This prototype does not yet collect packet-level TCP signals, a reassembled TLS ClientHello fingerprint, HTTP/2 settings, browser activity, task success, or cost measurements. These are planned additions and must be verified before being used in a claim.
+The current pilot serves a local HTTPS endpoint that terminates TLS itself and supports HTTP/1.1 plus HTTP/2. It logs TLS metadata, ordered/redacted headers, and structural H2 frame/SETTINGS events. One deterministic catalog workload has a server-side success oracle, and two browserless adapters can execute it. This is not a research dataset: packet-level TCP signals, reassembled TLS ClientHello fingerprints, packet-to-socket joining, a real browser runner, multiple independent client families, and cost accounting are still absent.
 
 ## Development pilot
 
-Use one manually operated Chrome session and one ordinary HTTP client only to validate TLS trust, routing, event writing, and inspectable logs. Such a comparison is an easy engineering check and is not the primary research comparison. Do not train a classifier from it.
+Use the ordinary HTTP/1.1 control and one explicit `curl_cffi` profile only to validate TLS trust, routing, event writing, H2 observation, and inspectable logs. A real browser pilot requires a pinned browser and isolated per-profile CA trust setup. Such comparisons are engineering checks only; do not train a classifier from them.
 
 ## Research evaluation planned
 

@@ -65,7 +65,7 @@ class EventWriter:
                 run_id=self.run_id,
                 status=status,
                 started_wall_ns=self._started_ns,
-                source_commit=None,
+                source_commit=self._server_metadata.get("source_commit"),
                 config_sha256=self._config_sha256,
                 server=self._server_metadata,
                 event_count=self._count,
@@ -84,6 +84,7 @@ class EventWriter:
         *,
         session_id: str | None = None,
         connection_id: str | None = None,
+        stream_id: int | None = None,
         request_id: str | None = None,
     ) -> None:
         with self._state_lock:
@@ -104,6 +105,7 @@ class EventWriter:
                 run_id=self.run_id,
                 session_id=session_id,
                 connection_id=connection_id,
+                stream_id=stream_id,
                 request_id=request_id,
                 payload=payload,
             )

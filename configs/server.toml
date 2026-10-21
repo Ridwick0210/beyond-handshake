@@ -1,13 +1,14 @@
 schema_version = "1.0"
 listen_host = "127.0.0.1"
 listen_port = 8443
+control_port = 8444
 allowed_hosts = ["localhost", "127.0.0.1", "::1"]
 
 [tls]
 cert = "local/tls/server-cert.pem"
 key = "local/tls/server-key.pem"
 minimum_version = "TLSv1_2"
-alpn = ["http/1.1"]
+alpn = ["h2", "http/1.1"]
 keylog_path = ""
 
 [limits]
