@@ -1,0 +1,8 @@
+# Repository instructions
+
+- Follow `docs/MASTER_BUILD_DOCUMENT.md` for project scope, phase order, data contracts, and permitted claims.
+- The current implementation covers Phases 0–3 only. Do not describe it as a completed detector or HTTP/2 collector.
+- Keep the prototype local-only by default. Never disable certificate verification in client examples.
+- Do not put participant data, raw packet captures, TLS key logs, generated certificates, private keys, model files, or raw run artifacts in source control.
+- Preserve the separation between labels/metadata and model features in later phases.
+- When a coding agent finishes a phase, update `docs/progress.md` with actual files, commands, outcomes, and remaining gaps. Never invent test results.

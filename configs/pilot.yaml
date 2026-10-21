@@ -1,0 +1,21 @@
+schema_version: '1.0'
+experiment_id: pilot-v1
+seed: 20261021
+description: Development-only smoke collection plan; not a preregistered research dataset.
+status: planning
+target:
+  positive: browserless automation
+  negative: real browser stack
+  ai_identity_claim: false
+initial_clients:
+  browser: manual Chrome and Playwright-controlled Chrome
+  browserless: ordinary requests control and one verified TLS/HTTP2 impersonator
+primary_question: >-
+  Which server-observable signals remain useful after verified TLS and HTTP/2
+  impersonation, and what execution cost accompanies increased imitation?
+initial_scope:
+  protocol: HTTPS over TCP
+  capture_point: direct TLS-terminating endpoint
+  workload: single synthetic local task, to be implemented in Phase 5
+  classifier: none until validated data and splits exist
+  packet_capture: deferred to Phase 6
