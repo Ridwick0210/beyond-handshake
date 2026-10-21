@@ -4,7 +4,7 @@ A local prototype for studying which server-observable network signals distingui
 
 ## Current status
 
-The local pilot now supports TLS with HTTP/1.1 and HTTP/2, bounded JSONL events, ordered structural H2 frame/SETTINGS observation, a deterministic catalog task with an oracle, an ordinary HTTP/1.1 runner, and an optional `curl_cffi` browser-profile runner. Packet capture supervision is loopback-scoped, but packet extraction and flow joining are not implemented. A real browser, multi-language adapters, dataset, classifier, and research evaluation are not available. Pilot logs are development artifacts, not research data.
+The local pilot now supports TLS with HTTP/1.1 and HTTP/2, bounded JSONL events, ordered structural H2 frame/SETTINGS observation, a deterministic catalog task with an oracle, HTTP/1.1 and optional `curl_cffi` runners, plus an implemented packet extraction, flow joining, dataset assembly, and baseline evaluation pipeline. TShark/dumpcap are missing on the current host, so packet stages are fixture-tested but not validated on real captures. A real browser, multi-language adapters, and research evaluation are not available. Pilot logs are development artifacts, not research data.
 
 ## Requirements
 
@@ -50,7 +50,16 @@ The separate HTTP control plane listens on loopback port `8444`. Register a dete
 
 The register command prints the session ID. Use a new session ID for every attempt. The `curl_cffi` profile name is validated against the installed package at runtime; its profile label is a client configuration, not proof of an actual Chrome browser. `./scripts/bh client manual <session-id>` prints a URL for human completion.
 
-`./scripts/bh capture doctor` reports whether `dumpcap` and `tshark` are available. If `dumpcap` is installed, `./scripts/bh capture loopback --seconds 30` records only TCP traffic for the configured local task port on interface `lo`; the current environment does not have the required capture tools, so Phase 6 extraction remains unavailable.
+`./scripts/bh capture doctor` reports whether `dumpcap` and `tshark` are available. If `dumpcap` is installed, `./scripts/bh capture loopback --seconds 30` records only TCP traffic for the configured local task port on interface `lo`. Packet extraction and analysis commands are implemented but need TShark to run on real captures:
+
+```sh
+./scripts/bh capture extract --pcap local/captures/run.pcapng --output local/derived/packets.tsv
+./scripts/bh capture join --packets local/derived/packets.tsv --events local/runs/RUN/events.jsonl --output local/derived/joined.jsonl
+./scripts/bh dataset build --features local/derived/joined.jsonl --labels local/labels.json --output-dir local/derived/dataset
+./scripts/bh dataset evaluate --dataset-dir local/derived/dataset --output local/derived/evaluation.json
+```
+
+The label registry is separate JSON metadata with `session_id`, `execution_stack` (`browser` or `browserless`), `client_family`, and a preassigned `partition` (`train`, `validation`, or `test`). The builder rejects client families assigned to multiple partitions and writes feature and label CSVs separately. The evaluator compares TLS-only, TLS-plus-HTTP/2, and full feature groups on the same held-out rows using a categorical Naive Bayes engineering baseline; it does not replace preregistered model selection, uncertainty analysis, or external validation.
 
 The CA and key files are private local development material under ignored `local/`. The server listens on `127.0.0.1` and only accepts the configured `Host` values. It does not need or request administrator access. To use a browser, import `local/tls/ca.pem` as a trusted authority in a **dedicated temporary browser profile**. Do not install the lab CA in the system-wide trust store. Remove the profile and CA when finished.
 

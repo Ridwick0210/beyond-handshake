@@ -171,13 +171,22 @@ def _task(args: argparse.Namespace) -> int:
 
 
 def _capture(args: argparse.Namespace) -> int:
-    from beyond_handshake.capture import capture_loopback, discover_capture_tools
+    from beyond_handshake.capture import (capture_loopback, discover_capture_tools,
+        join_and_aggregate, tshark_extract)
 
     if args.capture_command == "doctor":
         result = discover_capture_tools()
         print(json.dumps(result, indent=2))
         return 0 if (result.get("loopback_capture_supported")
                      and result.get("field_inventory_ok")) else 2
+    if args.capture_command == "extract":
+        result = tshark_extract(args.pcap, args.output)
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.capture_command == "join":
+        result = join_and_aggregate(args.packets, args.events, args.output)
+        print(json.dumps(result, indent=2))
+        return 0
     expected_port = load_server_config(_project_root() / "configs" / "server.toml").listen_port
     if args.port != expected_port:
         print(f"capture is restricted to the configured local task port {expected_port}", file=sys.stderr)
@@ -189,6 +198,17 @@ def _capture(args: argparse.Namespace) -> int:
         return 2
     print(json.dumps(result, indent=2))
     return 0 if result["status"] == "captured" else 2
+
+
+def _dataset(args: argparse.Namespace) -> int:
+    from beyond_handshake.dataset import build_dataset, evaluate_naive_bayes
+
+    if args.dataset_command == "build":
+        result = build_dataset(args.features, args.labels, args.output_dir)
+    else:
+        result = evaluate_naive_bayes(args.dataset_dir, args.output)
+    print(json.dumps(result, indent=2))
+    return 0
 
 
 def _client(args: argparse.Namespace) -> int:
@@ -262,6 +282,13 @@ def build_parser() -> argparse.ArgumentParser:
     capture = commands.add_parser("capture", help="inspect tools or capture loopback task traffic")
     capture_commands = capture.add_subparsers(dest="capture_command", required=True)
     capture_commands.add_parser("doctor", help="inspect dumpcap and TShark availability")
+    extract = capture_commands.add_parser("extract", help="extract versioned packet fields with TShark")
+    extract.add_argument("--pcap", type=Path, required=True)
+    extract.add_argument("--output", type=Path, required=True)
+    join = capture_commands.add_parser("join", help="join extracted flows to server events")
+    join.add_argument("--packets", type=Path, required=True)
+    join.add_argument("--events", type=Path, required=True)
+    join.add_argument("--output", type=Path, required=True)
     capture_run = capture_commands.add_parser("loopback", help="capture only TCP traffic to the local task port")
     capture_run.add_argument("--port", type=int, default=8443)
     capture_run.add_argument("--seconds", type=float, required=True)
@@ -282,6 +309,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_client.add_argument("--control-port", type=int, default=8444)
     run_client.add_argument("--timeout", type=float, default=120)
     run_client.add_argument("--output-dir", type=Path, default=Path("data/raw/client-attempts"))
+    dataset = commands.add_parser("dataset", help="build separated feature/label tables and evaluate baseline")
+    dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
+    dataset_build = dataset_commands.add_parser("build", help="aggregate joined observations using a label registry")
+    dataset_build.add_argument("--features", type=Path, required=True)
+    dataset_build.add_argument("--labels", type=Path, required=True)
+    dataset_build.add_argument("--output-dir", type=Path, required=True)
+    evaluate = dataset_commands.add_parser("evaluate", help="fit train-only baseline and score held-out families")
+    evaluate.add_argument("--dataset-dir", type=Path, required=True)
+    evaluate.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -301,6 +337,8 @@ def main() -> int:
             return _capture(args)
         if args.command == "client":
             return _client(args)
+        if args.command == "dataset":
+            return _dataset(args)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     return 2

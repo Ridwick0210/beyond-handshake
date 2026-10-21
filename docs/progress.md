@@ -48,7 +48,9 @@ This page distinguishes working prototype features from the complete requirement
 ## Phase 6 — Packet capture and TCP/TLS observations
 
 - Added `bh capture doctor`, TShark field-inventory parsing, and a bounded-duration dumpcap helper restricted to Linux loopback interface `lo` and the configured task port. It does not elevate privileges.
-- Environment check on 2026-10-22: neither `tshark` nor `dumpcap` is installed. Capture extraction, TCP SYN features, ClientHello reassembly, flow-to-connection joining, drop/coverage reports, and IPv6 validation are not implemented or verified.
+- Environment check on 2026-10-22: neither `tshark` nor `dumpcap` is installed. Added `bh capture extract` for TShark-versioned packet fields and `bh capture join` for unique socket-tuple/time association, JSONL connection features, and an explicit join-quality report. TCP SYN/TLS ClientHello values are extracted when supported by the TShark field inventory; HTTP/2 metadata comes from endpoint events because it is encrypted in PCAP.
+- Join and feature assembly are tested with synthetic packet/event fixtures only. Real TShark extraction, ClientHello reassembly correctness, capture-drop/coverage statistics, and IPv6 behavior remain unverified until tools are installed.
+- Added `docs/feature_dictionary.md` with sources, definitions, exclusions, and known limits for the first feature schema.
 - Do not treat server-side TLS metadata as packet-level ClientHello/TCP evidence.
 
 ## Phase 7 — Client adapters
@@ -58,10 +60,16 @@ This page distinguishes working prototype features from the complete requirement
 - Added manual task URL instructions. A real Chrome/Chromium or Playwright runner is not available: no browser binary or Playwright installation was found. Go/Rust adapters, task timeout supervision, process-tree cleanup, and three independent implementation families remain outstanding.
 - The curl profile is a configured imitation target, not a real Chrome browser or proof of matching all browser behavior.
 
+## Dataset and baseline analysis pipeline (engineering implementation)
+
+- Added `bh dataset build` to combine joined observation features with a separate label registry. It validates browser/browserless labels and train/validation/test metadata, rejects client-family split leakage, and writes `features.csv`, `labels.csv`, and a manifest.
+- Added `bh dataset evaluate`, a train-only categorical Naive Bayes baseline evaluated on the test partition. It compares TLS-only, TLS-plus-HTTP/2, and full features on common test rows and reports confusion counts, accuracy, browserless recall, browser false-positive rate, and full-model per-session scores. This is an engineering baseline, not research evidence.
+- Synthetic unit fixtures verify separation and family split checks. There are no real packet captures, labeled browser sessions, performance estimates, or confidence intervals.
+
 ## Verification run on 2026-10-22
 
 - `UV_CACHE_DIR=/tmp/networks-uv-cache uv lock --check --offline` and `uv sync --locked --offline --extra impersonation`: completed successfully.
-- `make test-unit`: 11 tests passed (frame observer fragmentation/ACK/buffer cap/typed WINDOW_UPDATE+RST_STREAM/large frame batches, task state machine, deterministic task spec/assets, and TShark inventory parsing).
+- Previous suite: 11 tests passed. Current suite: 15 tests pass, including TShark adapter behavior through a fake CLI fixture, unique tuple/time join, label-feature separation, family split rejection, and baseline evaluation on synthetic fixtures.
 - `./scripts/bh doctor`: reports valid config, local certificate present, h2 available, and missing browser/capture tools.
 - Local HTTPS smoke tests: `stdlib-http.client` completed all five task routes over HTTP/1.1; `curl_cffi==0.16.3` with `chrome150` completed the same task over h2; both reached `task_success=true`. The current client reported actual negotiated protocol `h2` and TLS 1.3 was observed by the server.
 - A `chrome150` h2 request retrieved a deterministic 192 KiB asset byte-for-byte, validating the current server's response flow-control path.
@@ -72,6 +80,6 @@ This page distinguishes working prototype features from the complete requirement
 1. Replace or formally amend the Phase 3 `asyncio`/`h11` requirement and finish negative TLS/HTTP correctness tests.
 2. Complete H2 concurrent-stream, reset, decoder-comparison, and protocol-error tests.
 3. Expand tasks and persist run/session manifests and oracle outcomes.
-4. Install approved capture tools, validate exact field inventory, implement TCP/TLS extraction and unambiguous flow joining, then publish capture coverage.
+4. Install approved capture tools, validate extraction against real PCAPs and Wireshark decode, verify SYN/ClientHello fields and packet loss, and produce capture coverage reports.
 5. Run a real browser using a temporary isolated profile with the lab CA trusted, and implement cleanup/cancellation. Add independently implemented Go/Rust adapters only after the first end-to-end runner is stable.
-6. Build the experiment orchestrator and evaluation pipeline only after the required measurement layers and run provenance are validated.
+6. Expand the baseline to preregistered grouped model comparisons, locked split manifests, uncertainty/ablation reporting, and protocol feature groups after real measurement and provenance are validated.
