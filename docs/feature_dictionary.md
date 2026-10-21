@@ -12,7 +12,7 @@ The extractor uses only fields present in `tshark -G fields` on the installed bu
 | `tcp_initial_window` | TCP SYN | First client SYN advertised window when the field is available. |
 | `tcp_mss` | TCP SYN options | First client SYN MSS. |
 | `tcp_window_scale` | TCP SYN options | First client SYN window scale, if present. |
-| `tcp_syn_options_order` | TCP SYN options | Ordered TCP option kind codes from the first client SYN. |
+| `tcp_syn_options_order` | TCP SYN options | Ordered TCP option kind codes parsed from the first client SYN's raw `tcp.options` bytes; malformed TLVs invalidate that packet join. |
 | `tls_handshake_types` | TShark TLS dissection | Distinct handshake message type codes visible in the captured flow. |
 | `tls_offered_versions` | ClientHello | Version values as dissected by TShark; not necessarily all supported versions unless extension fields are added. |
 | `tls_cipher_suites_order` | ClientHello | Ordered cipher suite values from first packet row containing the field. |
@@ -28,15 +28,19 @@ The extractor uses only fields present in `tshark -G fields` on the installed bu
 
 `session_id`, `connection_id`, `tcp_stream`, addresses, ports, timestamps, family, execution stack, controller, task outcome, and capture-quality statuses are identifiers/metadata, not predictors. The join report retains connection IDs for auditing in a separate file. Keep raw captures private and preserve their checksums.
 
-## Current event-only dataset
+## Initial event-only dataset
 
-The collected development dataset has no packet-derived features because this host's capture capability is blocked. Its `endpoint_tls_version` and `endpoint_alpn` are negotiated values from the server; the H2 settings, frame types, request count, and header-name order come from the server observer. TLS ClientHello offers and TCP features are unavailable. The model trainer drops numeric columns that are entirely missing from train and records them in `excluded_unobserved_features`.
+The first development dataset has no packet-derived features because capture capability was blocked at that time. Its `endpoint_tls_version` and `endpoint_alpn` are negotiated values from the server; the H2 settings, frame types, request count, and header-name order come from the server observer. TLS ClientHello offers and TCP features are unavailable. The model trainer drops numeric columns that are entirely missing from train and records them in `excluded_unobserved_features`.
+
+## Permission-enabled capture pilot
+
+The later 40-episode development run produced 40 PCAPs, but its fixed startup delay missed mandatory client SYN evidence for most browserless sessions. A separate rebuild with the corrected TShark boolean parser and explicit TLS decoding found packet-complete sessions for 20/20 Firefox, 1/10 curl-impersonate, and 0/10 Python stdlib attempts. The dataset records source coverage in `coverage.csv`, separately from model features. Mixed packet/event-only train or validation cohorts are rejected by the model trainer because capture failure correlates with the class in this pilot. A new run with the revised capture lifecycle is required.
 
 ## Known measurement limits
 
-- TShark fields vary by version and dissector preferences. The current host has TShark 4.6.9 and its field inventory was read, but actual extraction from a real captured PCAP remains unverified because packet capture lacks permission.
+- TShark fields vary by version and dissector preferences. TShark 4.6.9 has now been used to extract real local captures, with explicit TLS decoding on port 8443. The pilot does not validate packet loss or every offered-version field.
 - TLS 1.3 handshake bytes after ServerHello are encrypted in ordinary passive captures. Selected TLS version/cipher/ALPN are server-side negotiated fields; they are not offered-list features.
-- TShark's standard field output does not preserve arbitrary TCP option presence/order in every build. `tcp.options.kind` is used only when available and must be validated against packet bytes/Wireshark before research use.
+- TShark 4.6.9 exposes raw `tcp.options` bytes. The local extractor now parses their TLV order and observed it in 40/40 packet-complete sessions. An independent Wireshark or byte-level comparison remains a separate acceptance check.
 - This first extractor does not export TShark expert diagnostics, capture-drop counters, retransmission rates, JA3/JA4 hashes, or server-certificate features.
 - The tuple/time join uses server-side peer tuple and event wall time. It is limited to matching capture/socket vantage and synchronized host clock; ambiguous/missing joins are excluded and listed in the report.
 - The categorical Naive Bayes command is an engineering test baseline. The Phase 12 logistic and forest bundles use train-fitted transforms and validation-selected thresholds, but this 40-session local development cohort is far too small to estimate generalization or confidence intervals. Their validation scores must not be presented as detector performance.

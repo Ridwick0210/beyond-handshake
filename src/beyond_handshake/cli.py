@@ -182,7 +182,7 @@ def _capture(args: argparse.Namespace) -> int:
         return 0 if (result.get("loopback_capture_supported")
                      and result.get("field_inventory_ok")) else 2
     if args.capture_command == "extract":
-        result = tshark_extract(args.pcap, args.output)
+        result = tshark_extract(args.pcap, args.output, tls_port=args.tls_port)
         print(json.dumps(result, indent=2))
         return 0
     if args.capture_command == "join":
@@ -218,10 +218,12 @@ def _dataset(args: argparse.Namespace) -> int:
 
 
 def _experiment(args: argparse.Namespace) -> int:
-    from beyond_handshake.experiment import collect_plan, plan_experiment
+    from beyond_handshake.experiment import collect_plan, plan_experiment, rebuild_capture_dataset
 
     if args.experiment_command == "plan":
         result = plan_experiment(args.config, args.output)
+    elif args.experiment_command == "rebuild":
+        result = rebuild_capture_dataset(args.run_dir, args.output_dir, args.tls_port)
     else:
         result = collect_plan(args.plan, args.output_dir, args.server_config)
     print(json.dumps(result, indent=2))
@@ -231,7 +233,8 @@ def _experiment(args: argparse.Namespace) -> int:
 def _model(args: argparse.Namespace) -> int:
     from beyond_handshake.modeling import train_baselines
 
-    result = train_baselines(args.dataset_dir, args.output_dir, args.max_validation_fpr)
+    result = train_baselines(args.dataset_dir, args.output_dir, args.max_validation_fpr,
+                             args.feature_group)
     print(json.dumps(result, indent=2))
     return 0
 
@@ -319,6 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
     capture_commands = capture.add_subparsers(dest="capture_command", required=True)
     capture_commands.add_parser("doctor", help="inspect dumpcap and TShark availability")
     extract = capture_commands.add_parser("extract", help="extract versioned packet fields with TShark")
+    extract.add_argument("--tls-port", type=int, default=8443,
+                         help="decode this local TLS port explicitly (default: 8443)")
     extract.add_argument("--pcap", type=Path, required=True)
     extract.add_argument("--output", type=Path, required=True)
     join = capture_commands.add_parser("join", help="join extracted flows to server events")
@@ -366,12 +371,18 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--plan", type=Path, required=True)
     collect.add_argument("--output-dir", type=Path, default=Path("data/interim"))
     collect.add_argument("--server-config", type=Path, default=Path("configs/server.toml"))
+    rebuild = experiment_commands.add_parser("rebuild", help="re-extract a finished collection into a new directory")
+    rebuild.add_argument("--run-dir", type=Path, required=True)
+    rebuild.add_argument("--output-dir", type=Path, required=True)
+    rebuild.add_argument("--tls-port", type=int, default=8443)
     model = commands.add_parser("model", help="train transparent Phase 12 baselines using train/validation only")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     train = model_commands.add_parser("train", help="fit models and freeze validation-selected thresholds")
     train.add_argument("--dataset-dir", type=Path, required=True)
     train.add_argument("--output-dir", type=Path, required=True)
     train.add_argument("--max-validation-fpr", type=float, default=0.05)
+    train.add_argument("--feature-group", choices=("tls_only", "tls_plus_h2", "full"),
+                       default="full")
     fidelity = commands.add_parser("fidelity", help="write an honest protocol-observation comparison")
     fidelity.add_argument("--features", type=Path, required=True)
     fidelity.add_argument("--labels", type=Path, required=True)

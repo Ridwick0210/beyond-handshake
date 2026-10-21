@@ -9,10 +9,11 @@ import math
 from datetime import UTC, datetime
 from pathlib import Path
 
-from beyond_handshake.dataset import ALLOWED_FEATURES
+from beyond_handshake.dataset import ALLOWED_FEATURES, FEATURE_GROUPS
 
 
-def train_baselines(dataset_dir: Path, output_dir: Path, max_false_positive_rate: float = 0.05) -> dict:
+def train_baselines(dataset_dir: Path, output_dir: Path, max_false_positive_rate: float = 0.05,
+                    feature_group: str = "full") -> dict:
     """Fit logistic regression and random forest on train, choose cutoffs on validation only."""
     try:
         import joblib
@@ -35,9 +36,15 @@ def train_baselines(dataset_dir: Path, output_dir: Path, max_false_positive_rate
         labels = list(csv.DictReader(stream))
     if not labels or set(features) != {r["session_id"] for r in labels}:
         raise ValueError("features and labels must have identical nonempty session IDs")
-    registered_columns = sorted(set(next(iter(features.values()))) - {"session_id"})
-    if not registered_columns or not set(registered_columns) <= ALLOWED_FEATURES:
+    if feature_group not in FEATURE_GROUPS:
+        raise ValueError(f"unknown feature group: {feature_group}")
+    _validate_packet_coverage(dataset_dir, labels)
+    observed_columns = set(next(iter(features.values()))) - {"session_id"}
+    if not observed_columns or not observed_columns <= ALLOWED_FEATURES:
         raise ValueError("feature file contains no registered features or contains forbidden fields")
+    registered_columns = sorted(observed_columns & FEATURE_GROUPS[feature_group])
+    if not registered_columns:
+        raise ValueError(f"feature group {feature_group} has no columns in this dataset")
     train = [r for r in labels if r["partition"] == "train"]
     validation = [r for r in labels if r["partition"] == "validation"]
     if not train or not validation:
@@ -91,6 +98,7 @@ def train_baselines(dataset_dir: Path, output_dir: Path, max_false_positive_rate
                      "threshold": threshold, "score_kind": score_kind,
                      "excluded_unobserved_features": excluded_unobserved,
                      "max_validation_fpr": max_false_positive_rate,
+                     "feature_group": feature_group,
                      "sklearn_version": sklearn.__version__, "feature_schema": "session-dataset/1",
                      "features_sha256": _sha256(features_path), "labels_sha256": _sha256(labels_path)},
                     bundle_path)
@@ -113,6 +121,7 @@ def train_baselines(dataset_dir: Path, output_dir: Path, max_false_positive_rate
                             for r in validation]
     report = {"schema_version": "phase12-model-selection/1", "created_at_utc": datetime.now(UTC).isoformat(),
               "train_rows": len(train), "validation_rows": len(validation), "test_rows_read": 0,
+              "feature_group": feature_group,
               "feature_columns": columns, "excluded_unobserved_features": excluded_unobserved,
               "features_sha256": _sha256(features_path),
               "labels_sha256": _sha256(labels_path), "sklearn_version": sklearn.__version__,
@@ -203,6 +212,34 @@ def _validate_group_partitioning(labels: list[dict]) -> None:
         raise ValueError("browserless client family crosses partitions")
     if any(len(p) > 1 for p in groups.values()):
         raise ValueError("participant/profile/block/pair group crosses partitions")
+
+
+def _validate_packet_coverage(dataset_dir: Path, labels: list[dict]) -> None:
+    """Do not let class-correlated capture gaps become predictive missing values."""
+    coverage_path = dataset_dir / "coverage.csv"
+    if not coverage_path.is_file():
+        manifest_path = dataset_dir / "dataset-manifest.json"
+        if manifest_path.is_file() and json.loads(manifest_path.read_text(
+                encoding="utf-8")).get("coverage_path"):
+            raise ValueError("dataset coverage sidecar is missing")
+        return  # Legacy synthetic fixtures have no measurement-source sidecar.
+    with coverage_path.open(encoding="utf-8", newline="") as stream:
+        coverage = {row["session_id"]: row for row in csv.DictReader(stream)}
+    fitted = [row for row in labels if row["partition"] in {"train", "validation"}]
+    if set(coverage) != {row["session_id"] for row in labels}:
+        raise ValueError("coverage and label session IDs differ")
+    has_packets = any(int(coverage[row["session_id"]]["packet_connection_count"]) > 0
+                      for row in fitted)
+    if has_packets:
+        incomplete = [row for row in fitted
+                      if coverage[row["session_id"]]["packet_complete"] != "True"]
+        if incomplete:
+            counts = {}
+            for row in incomplete:
+                key = row["execution_stack"]
+                counts[key] = counts.get(key, 0) + 1
+            raise ValueError("partial packet coverage across train/validation sessions; "
+                             f"incomplete by class: {counts}. Recollect or build an explicit event-only dataset")
 
 
 def _select_threshold(y_true: list[int], scores: list[float], cap: float) -> tuple[float, dict]:

@@ -14,7 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from beyond_handshake.capture import (capture_loopback, features_from_server_events,
-                                      join_and_aggregate, tshark_extract)
+                                      join_and_aggregate, parse_capture_health,
+                                      tshark_extract)
 from beyond_handshake.client import run_curl_cffi, run_firefox, run_stdlib, write_attempt
 from beyond_handshake.config import load_server_config
 from beyond_handshake.dataset import build_dataset
@@ -117,11 +118,16 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
         capture_result: dict = {}
         capture_error: list[str] = []
         capture_done = threading.Event()
+        capture_ready = threading.Event()
+        capture_stop = threading.Event()
+        # The configured window is a minimum after capture startup. The collector
+        # remains active through a slow browser launch and the entire task.
+        capture_limit = min(3600.0, timeout + capture_seconds + 15.0)
 
         def capture_worker() -> None:
             try:
-                capture_result.update(capture_loopback(server_config.listen_port, capture_seconds,
-                                                       run_dir / "captures"))
+                capture_result.update(capture_loopback(server_config.listen_port, capture_limit,
+                    run_dir / "captures", ready_event=capture_ready, stop_event=capture_stop))
             except Exception as exc:
                 capture_error.append(f"{type(exc).__name__}: {exc}")
             finally:
@@ -129,8 +135,10 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
 
         capture_thread = threading.Thread(target=capture_worker, name="bh-loopback-capture", daemon=True)
         capture_thread.start()
-        time.sleep(0.5)
-        record("capture_ready", status="capturing" if not capture_done.is_set() else "capture_unavailable")
+        capture_ready.wait(timeout=8)
+        capture_ready_at = time.monotonic() if capture_ready.is_set() else None
+        record("capture_ready", status="capturing" if capture_ready_at is not None else "capture_unavailable",
+               capture_duration_limit_seconds=capture_limit)
         record("running")
         cpu_start = time.process_time_ns()
         rss_before = _rss_bytes()
@@ -160,7 +168,12 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
         cpu_ns = time.process_time_ns() - cpu_start
         rss_after = _rss_bytes()
         record("draining")
-        capture_thread.join(timeout=capture_seconds + 12)
+        if capture_ready_at is not None:
+            remaining = capture_seconds - (time.monotonic() - capture_ready_at)
+            if remaining > 0:
+                time.sleep(remaining)
+        capture_stop.set()
+        capture_thread.join(timeout=12)
         if capture_thread.is_alive():
             capture_error.append("TimeoutError: capture worker did not stop")
         record("finalized", capture_status=capture_result.get("status", "failed"),
@@ -190,10 +203,12 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
     labels_path.write_text(json.dumps(labels, indent=2) + "\n", encoding="utf-8")
     event_features_path = run_dir / "event-features.jsonl"
     feature_manifest = features_from_server_events(event_file, event_features_path)
-    packet_manifest, join_manifests, joined_rows = _extract_and_join_captures(outcomes, event_file, run_dir)
+    packet_manifest, join_manifests, joined_rows = _extract_and_join_captures(
+        outcomes, event_file, run_dir, server_config.listen_port)
     event_rows = [json.loads(line) for line in event_features_path.read_text(encoding="utf-8").splitlines()
                   if line.strip()]
-    combined_rows = _combine_feature_sources(joined_rows, event_rows)
+    combined_rows = _combine_feature_sources(joined_rows, event_rows,
+                                             {row["session_id"] for row in labels})
     combined_features_path = run_dir / "features.jsonl"
     combined_features_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n"
                                                  for row in combined_rows), encoding="utf-8")
@@ -229,7 +244,57 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
     return manifest
 
 
-def _extract_and_join_captures(outcomes: list[dict], event_file: Path, run_dir: Path) -> tuple[list[dict], list[dict], list[dict]]:
+def rebuild_capture_dataset(run_dir: Path, output_dir: Path, tls_port: int) -> dict:
+    """Re-extract a finished collection without changing its raw capture or event files."""
+    run_dir = run_dir.expanduser().resolve()
+    output_dir = output_dir.expanduser().resolve()
+    collection_path = run_dir / "collection-manifest.json"
+    if not collection_path.is_file():
+        raise ValueError("collection is not finalized; wait for collection-manifest.json")
+    collection = json.loads(collection_path.read_text(encoding="utf-8"))
+    if collection.get("schema_version") != "collection-run/1":
+        raise ValueError("unsupported collection manifest")
+    if output_dir.exists():
+        raise FileExistsError(f"rebuild output already exists: {output_dir}")
+    events_path = Path(collection["event_file"])
+    labels_path = run_dir / "labels.json"
+    results_path = run_dir / "episodes.jsonl"
+    outcomes = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    if len(outcomes) != collection.get("attempt_count"):
+        raise ValueError("episode ledger count disagrees with collection manifest")
+    if not events_path.is_file() or not labels_path.is_file():
+        raise FileNotFoundError("collection event or label source is missing")
+    output_dir.mkdir(parents=True)
+    event_features_path = output_dir / "event-features.jsonl"
+    event_report = features_from_server_events(events_path, event_features_path)
+    extractions, joins, packet_rows = _extract_and_join_captures(
+        outcomes, events_path, output_dir, tls_port)
+    event_rows = [json.loads(line) for line in event_features_path.read_text(encoding="utf-8").splitlines()
+                  if line.strip()]
+    allowed_sessions = {row["session_id"] for row in json.loads(labels_path.read_text(encoding="utf-8"))}
+    combined = _combine_feature_sources(packet_rows, event_rows, allowed_sessions)
+    feature_path = output_dir / "features.jsonl"
+    feature_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in combined), encoding="utf-8")
+    dataset_report = build_dataset(feature_path, labels_path, output_dir / "dataset")
+    report = {"schema_version": "capture-rebuild/1", "source_collection": str(collection_path),
+              "source_collection_sha256": _sha256(collection_path), "events_sha256": _sha256(events_path),
+              "labels_sha256": _sha256(labels_path), "episodes_sha256": _sha256(results_path),
+              "tls_decode_port": tls_port, "event_features": event_report,
+              "packet_extractions": extractions, "packet_joins": joins, "dataset": dataset_report,
+              "joined_packet_connection_count": len(packet_rows),
+              "event_only_connection_count": sum(row.get("feature_source") == "server-events-only"
+                                                 for row in combined),
+              "packet_eligible_session_count": len({sid for row in packet_rows
+                  for sid in row.get("session_ids", [])}),
+              "limitations": ["rebuild does not recollect traffic or repair missing SYN/ClientHello evidence",
+                              "development cohort; no detector-performance claim"]}
+    (output_dir / "rebuild-manifest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def _extract_and_join_captures(outcomes: list[dict], event_file: Path, run_dir: Path,
+                               tls_port: int) -> tuple[list[dict], list[dict], list[dict]]:
     """Extract each episode capture and join flows to server connections; preserve all failures."""
     packet_dir = run_dir / "packet-observations"
     extraction_reports, join_reports, joined_rows = [], [], []
@@ -238,12 +303,20 @@ def _extract_and_join_captures(outcomes: list[dict], event_file: Path, run_dir: 
         if capture.get("status") != "captured" or not capture.get("capture_path"):
             continue
         episode_id = outcome["episode"]["episode_id"]
+        stderr_path = Path(capture.get("stderr_path", ""))
+        health = (parse_capture_health(stderr_path.read_text(encoding="utf-8", errors="replace"))
+                  if stderr_path.is_file() else {"packets_received": None, "packets_dropped": None})
+        if (health.get("packets_dropped") or 0) > 0:
+            extraction_reports.append({"episode_id": episode_id, "status": "excluded_capture_drop",
+                                       "capture_health": health})
+            continue
         packet_path = packet_dir / f"{episode_id}.tsv"
         joined_path = packet_dir / f"{episode_id}.joined.jsonl"
         try:
-            extraction = tshark_extract(Path(capture["capture_path"]), packet_path)
-            joined = join_and_aggregate(packet_path, event_file, joined_path)
-            extraction_reports.append({"episode_id": episode_id, **extraction})
+            extraction = tshark_extract(Path(capture["capture_path"]), packet_path, tls_port=tls_port)
+            joined = join_and_aggregate(packet_path, event_file, joined_path,
+                                        session_id=outcome["episode"]["session_id"])
+            extraction_reports.append({"episode_id": episode_id, "capture_health": health, **extraction})
             join_reports.append({"episode_id": episode_id, **joined})
             joined_rows.extend(json.loads(line) for line in joined_path.read_text(encoding="utf-8").splitlines()
                                if line.strip())
@@ -253,8 +326,14 @@ def _extract_and_join_captures(outcomes: list[dict], event_file: Path, run_dir: 
     return extraction_reports, join_reports, joined_rows
 
 
-def _combine_feature_sources(joined_rows: list[dict], event_rows: list[dict]) -> list[dict]:
+def _combine_feature_sources(joined_rows: list[dict], event_rows: list[dict],
+                             allowed_session_ids: set[str] | None = None) -> list[dict]:
     """Use packet+endpoint features for joined connections; event fallback for the rest."""
+    if allowed_session_ids is not None:
+        joined_rows = [row for row in joined_rows
+                       if allowed_session_ids.intersection(row.get("session_ids", []))]
+        event_rows = [row for row in event_rows
+                      if allowed_session_ids.intersection(row.get("session_ids", []))]
     joined_connection_ids = {row.get("connection_id") for row in joined_rows}
     combined = [{**row, "feature_source": "packet-and-server-events"} for row in joined_rows]
     combined.extend(row for row in event_rows if row.get("connection_id") not in joined_connection_ids)

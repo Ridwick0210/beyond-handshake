@@ -1,6 +1,6 @@
 # Local development pilot report
 
-**Run:** `local-dev-cross-layer-v1`  
+**Run:** `data/interim/local-dev-cross-layer-v1/` (initial event-only run)
 **Date:** 2026-10-22 (Asia/Kolkata)  
 **Purpose:** exercise the collection, feature, split, and training pipeline; this is not a research sample.
 

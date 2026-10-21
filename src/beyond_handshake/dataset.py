@@ -53,13 +53,15 @@ def build_dataset(features_jsonl: Path, labels_json: Path, output_dir: Path) -> 
     if group_leaks:
         raise ValueError(f"dependent groups cross partitions: {group_leaks}")
     per_session = defaultdict(list)
+    source_counts = defaultdict(Counter)
     for line in features_jsonl.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         for sid in row.get("session_ids", []):
             if sid in labels:
                 per_session[sid].append(row["features"])
+                source_counts[sid][row.get("feature_source", "unknown")] += 1
     output_dir.mkdir(parents=True, exist_ok=True)
-    feature_rows, label_rows = [], []
+    feature_rows, label_rows, coverage_rows = [], [], []
     for sid, label in labels.items():
         conns = per_session.get(sid, [])
         if not conns:
@@ -73,6 +75,12 @@ def build_dataset(features_jsonl: Path, labels_json: Path, output_dir: Path) -> 
             values = [c.get(field) for c in conns if c.get(field) not in (None, [], "")]
             row[field] = json.dumps(values, sort_keys=True, separators=(",", ":")) if values else "<missing>"
         feature_rows.append(row)
+        counts = source_counts[sid]
+        coverage_rows.append({"session_id": sid,
+                              "packet_connection_count": counts["packet-and-server-events"],
+                              "event_only_connection_count": counts["server-events-only"],
+                              "unknown_source_connection_count": counts["unknown"],
+                              "packet_complete": counts["packet-and-server-events"] == len(conns)})
         label_rows.append({"session_id": sid, "client_family": label["client_family"],
                            "execution_stack": label["execution_stack"], "partition": label["partition"],
                            "controller": label.get("controller", "unknown"),
@@ -85,10 +93,29 @@ def build_dataset(features_jsonl: Path, labels_json: Path, output_dir: Path) -> 
         raise ValueError("no sessions in labels matched joined feature rows")
     _write_csv(output_dir / "features.csv", feature_rows)
     _write_csv(output_dir / "labels.csv", label_rows)
+    _write_csv(output_dir / "coverage.csv", coverage_rows)
+    source_totals = Counter()
+    for counts in source_counts.values():
+        source_totals.update(counts)
+    coverage_by_cohort: dict[tuple[str, str, str], dict[str, int]] = {}
+    for row in coverage_rows:
+        label = labels[row["session_id"]]
+        cohort = (label["partition"], label["execution_stack"], label["client_family"])
+        counts = coverage_by_cohort.setdefault(cohort, {"sessions": 0, "packet_complete_sessions": 0,
+                                                        "packet_connections": 0, "event_only_connections": 0})
+        counts["sessions"] += 1
+        counts["packet_complete_sessions"] += int(row["packet_complete"])
+        counts["packet_connections"] += row["packet_connection_count"]
+        counts["event_only_connections"] += row["event_only_connection_count"]
     manifest = {"schema_version": "session-dataset/1", "row_count": len(feature_rows),
                 "matched_session_count": sum(bool(per_session.get(sid)) for sid in labels),
                 "unmatched_sessions": [sid for sid in labels if not per_session.get(sid)],
                 "features_path": "features.csv", "labels_path": "labels.csv",
+                "coverage_path": "coverage.csv", "source_connection_counts": dict(source_totals),
+                "packet_complete_session_count": sum(row["packet_complete"] for row in coverage_rows),
+                "coverage_by_cohort": [{"partition": key[0], "execution_stack": key[1],
+                                        "client_family": key[2], **value}
+                                       for key, value in sorted(coverage_by_cohort.items())],
                 "joined_features_sha256": _sha256(features_jsonl), "label_registry_sha256": _sha256(labels_json),
                 "label_feature_separation": True, "family_split_leaks": split_leaks}
     (output_dir / "dataset-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

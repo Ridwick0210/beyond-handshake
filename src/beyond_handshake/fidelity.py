@@ -12,8 +12,10 @@ def fidelity_report(features_path: Path, labels_path: Path, output_path: Path) -
     with features_path.open(encoding="utf-8", newline="") as stream:
         features = {row["session_id"]: row for row in csv.DictReader(stream)}
     labels = list(json.loads(labels_path.read_text(encoding="utf-8")))
-    dimensions = ("endpoint_tls_version", "endpoint_alpn", "h2_inbound_settings_order",
-                  "h2_inbound_frame_types", "h2_header_names_order")
+    packet_dimensions = ("tls_cipher_suites_order", "tls_extension_types_order",
+                         "tls_alpn_offers", "tcp_syn_options_order")
+    dimensions = (*packet_dimensions, "endpoint_tls_version", "endpoint_alpn",
+                  "h2_inbound_settings_order", "h2_inbound_frame_types", "h2_header_names_order")
     by_client: dict[str, dict[str, Counter]] = defaultdict(lambda: defaultdict(Counter))
     for label in labels:
         row = features.get(label["session_id"])
@@ -47,11 +49,15 @@ def fidelity_report(features_path: Path, labels_path: Path, output_path: Path) -
                             "overall_status": "approximate_not_verified",
                             "components": details,
                             "reason": "No real Chrome 150 executable was available to compare against the impersonation profile."})
+    observed_packet_dimensions = [dimension for dimension in packet_dimensions
+                                  if any(by_client[client].get(dimension) for client in by_client)]
     report = {"schema_version": "client-fidelity/1", "comparisons": comparisons,
-              "feature_source": "server-events-only",
-              "not_observed": ["ClientHello cipher/extension order", "TCP SYN options", "GREASE behavior",
-                               "wire-level H2 frame ordering before endpoint parsing"],
-              "interpretation": "These observations verify negotiation and endpoint-visible structure, not full browser equivalence."}
+              "feature_source": "packet-and-server-events" if observed_packet_dimensions else "server-events-only",
+              "observed_packet_dimensions": observed_packet_dimensions,
+              "not_observed": [dimension for dimension in packet_dimensions
+                               if dimension not in observed_packet_dimensions] +
+                              ["GREASE behavior", "wire-level H2 frame ordering before endpoint parsing"],
+              "interpretation": "Cross-family differences are exploratory. Chrome 150 target fidelity remains unverified without a matching real browser."}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report

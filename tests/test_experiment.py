@@ -5,18 +5,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from beyond_handshake.experiment import _combine_feature_sources, plan_experiment
+from beyond_handshake.experiment import (_combine_feature_sources,
+                                         plan_experiment, rebuild_capture_dataset)
 
 
 class ExperimentPlanningTests(unittest.TestCase):
+    def test_rebuild_refuses_unfinished_collection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "active"
+            run.mkdir()
+            with self.assertRaisesRegex(ValueError, "not finalized"):
+                rebuild_capture_dataset(run, root / "rebuilt", 8443)
+            self.assertFalse((root / "rebuilt").exists())
+
     def test_packet_join_replaces_event_only_row_for_same_connection(self):
         packet_rows = [{"connection_id": "joined", "session_ids": ["s1"],
                         "features": {"tcp_packet_count": 5}}]
         event_rows = [{"connection_id": "joined", "session_ids": ["s1"],
                        "feature_source": "server-events-only", "features": {"endpoint_alpn": "h2"}},
                       {"connection_id": "fallback", "session_ids": ["s2"],
-                       "feature_source": "server-events-only", "features": {"endpoint_alpn": "http/1.1"}}]
-        rows = _combine_feature_sources(packet_rows, event_rows)
+                       "feature_source": "server-events-only", "features": {"endpoint_alpn": "http/1.1"}},
+                      {"connection_id": "prior-run", "session_ids": ["old"],
+                       "feature_source": "server-events-only", "features": {"endpoint_alpn": "h2"}}]
+        rows = _combine_feature_sources(packet_rows, event_rows, {"s1", "s2"})
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["feature_source"], "packet-and-server-events")
         self.assertEqual(rows[1]["connection_id"], "fallback")
