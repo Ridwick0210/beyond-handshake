@@ -224,6 +224,10 @@ def _experiment(args: argparse.Namespace) -> int:
         result = plan_experiment(args.config, args.output)
     elif args.experiment_command == "rebuild":
         result = rebuild_capture_dataset(args.run_dir, args.output_dir, args.tls_port)
+    elif args.experiment_command == "develop":
+        from beyond_handshake.development import run_development
+
+        result = run_development(args.config, args.output_dir, args.model_dir, args.server_config)
     else:
         result = collect_plan(args.plan, args.output_dir, args.server_config)
     print(json.dumps(result, indent=2))
@@ -249,7 +253,8 @@ def _fidelity(args: argparse.Namespace) -> int:
 
 def _client(args: argparse.Namespace) -> int:
     from beyond_handshake.client import (available_impersonation_profiles, run_curl_cffi,
-                                         run_firefox, run_stdlib, write_attempt)
+                                         run_firefox, run_go_stdlib, run_go_tls_client,
+                                         run_stdlib, write_attempt)
 
     if args.client_command == "profiles":
         try:
@@ -277,12 +282,26 @@ def _client(args: argparse.Namespace) -> int:
         elif args.adapter == "firefox":
             result = run_firefox(args.session_id, args.origin, args.ca_file,
                                  args.timeout, args.control_port)
+        elif args.adapter == "go-stdlib":
+            result = run_go_stdlib(args.session_id, args.origin, args.ca_file,
+                                   args.timeout, args.control_port)
+        elif args.adapter == "go-tls-client":
+            if args.stage != 1 or not args.profile:
+                print("go-tls-client requires --stage 1 and --profile chrome_150", file=sys.stderr)
+                return 2
+            result = run_go_tls_client(args.session_id, args.origin, args.ca_file,
+                                       args.timeout, args.profile, args.control_port)
         else:
-            if not args.profile:
-                print("--profile is required for the curl-cffi adapter", file=sys.stderr)
+            stage = 1 if args.stage is None else args.stage
+            if stage not in (0, 1):
+                print("--stage must be 0 or 1", file=sys.stderr)
+                return 2
+            if stage == 1 and not args.profile:
+                print("curl-cffi stage 1 requires --profile", file=sys.stderr)
                 return 2
             result = run_curl_cffi(args.session_id, args.origin, args.ca_file,
-                                   args.timeout, args.profile, args.control_port)
+                                   args.timeout, args.profile, args.control_port, stage)
+            result.imitation_stage = stage
         path = write_attempt(result, args.output_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"client setup failed: {exc}", file=sys.stderr)
@@ -346,8 +365,11 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--ca-file", type=Path, default=Path("local/tls/ca.pem"))
     run_client = client_commands.add_parser("run", help="run a task through a declared trusted adapter")
     run_client.add_argument("session_id")
-    run_client.add_argument("--adapter", choices=["stdlib", "curl-cffi", "firefox"], default="curl-cffi")
+    run_client.add_argument("--adapter", choices=["stdlib", "curl-cffi", "firefox", "go-stdlib",
+                                                   "go-tls-client"],
+                            default="curl-cffi")
     run_client.add_argument("--profile")
+    run_client.add_argument("--stage", type=int, choices=[0, 1])
     run_client.add_argument("--origin", default="https://localhost:8443")
     run_client.add_argument("--ca-file", type=Path, default=Path("local/tls/ca.pem"))
     run_client.add_argument("--control-port", type=int, default=8444)
@@ -375,6 +397,12 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument("--run-dir", type=Path, required=True)
     rebuild.add_argument("--output-dir", type=Path, required=True)
     rebuild.add_argument("--tls-port", type=int, default=8443)
+    develop = experiment_commands.add_parser("develop", help="collect, audit, and train a local development cohort")
+    develop.add_argument("--config", type=Path, default=Path("configs/development_experiment_v3.json"))
+    develop.add_argument("--output-dir", type=Path, default=Path("data/interim/captured-v3"))
+    develop.add_argument("--model-dir", type=Path,
+                         default=Path("artifacts/models/local-dev-cross-layer-v3"))
+    develop.add_argument("--server-config", type=Path, default=Path("configs/server.toml"))
     model = commands.add_parser("model", help="train transparent Phase 12 baselines using train/validation only")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     train = model_commands.add_parser("train", help="fit models and freeze validation-selected thresholds")

@@ -18,7 +18,8 @@ class DatasetTests(unittest.TestCase):
             labels = root / "labels.json"
             labels.write_text(json.dumps([
                 {"session_id": "tr", "execution_stack": "browser", "client_family": "fam1", "partition": "train"},
-                {"session_id": "tr2", "execution_stack": "browserless", "client_family": "fam2", "partition": "train"},
+                {"session_id": "tr2", "execution_stack": "browserless", "client_family": "fam2",
+                 "partition": "train", "imitation_stage": 1},
                 {"session_id": "te", "execution_stack": "browserless", "client_family": "fam3", "partition": "test"},
                 {"session_id": "te2", "execution_stack": "browser", "client_family": "fam4", "partition": "test"},
             ]))
@@ -26,7 +27,9 @@ class DatasetTests(unittest.TestCase):
             manifest = build_dataset(joined, labels, out)
             self.assertTrue(manifest["label_feature_separation"])
             self.assertNotIn("execution_stack", (out / "features.csv").read_text())
+            self.assertNotIn("imitation_stage", (out / "features.csv").read_text())
             self.assertIn("execution_stack", (out / "labels.csv").read_text())
+            self.assertIn("imitation_stage", (out / "labels.csv").read_text())
             result = evaluate_naive_bayes(out, root / "eval.json")
             self.assertEqual(result["test_count"], 2)
             self.assertEqual(set(result["comparisons"]), {"tls_only", "tls_plus_h2", "full"})

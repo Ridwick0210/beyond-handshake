@@ -83,6 +83,7 @@ def build_dataset(features_jsonl: Path, labels_json: Path, output_dir: Path) -> 
                               "packet_complete": counts["packet-and-server-events"] == len(conns)})
         label_rows.append({"session_id": sid, "client_family": label["client_family"],
                            "execution_stack": label["execution_stack"], "partition": label["partition"],
+                           "imitation_stage": label.get("imitation_stage"),
                            "controller": label.get("controller", "unknown"),
                            "task_id": label.get("task_id", "unknown"),
                            "participant_id": label.get("participant_id", ""),

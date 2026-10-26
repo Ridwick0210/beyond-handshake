@@ -1,6 +1,6 @@
 # Implementation progress
 
-**Last updated:** 2026-10-22 (Asia/Kolkata)
+**Last updated:** 2026-10-26 (Asia/Kolkata)
 
 This page distinguishes working prototype components from complete requirements in `MASTER_BUILD_DOCUMENT.md`. Components through Phase 12 exist, but acceptance remains evidence-based. No final-test dataset or supported research finding exists.
 
@@ -27,7 +27,7 @@ This page distinguishes working prototype components from complete requirements 
 
 - The localhost TLS server supports HTTP/1.1 and advertises ALPN `h2` and `http/1.1`.
 - Keeps the standard-library `ThreadingHTTPServer` implementation from the offline prototype rather than the build document's `asyncio`/`h11` design. This implementation choice is documented in the Phase 0–3 decision record; phase acceptance for the prescribed h11 lifecycle is not claimed.
-- Local CA certificate verification succeeded in HTTP/1.1 and h2 clients. A deliberate wrong-CA rejection test is still outstanding.
+- Local CA certificate verification succeeded in HTTP/1.1 and h2 clients. On 2026-10-26 the Go adapter rejected the lab server certificate when given the unrelated system CA bundle (`x509: certificate signed by unknown authority`); an automated negative TLS regression test is still outstanding.
 
 ## Phase 4 — HTTP/2 and structural observation
 
@@ -99,11 +99,38 @@ This page distinguishes working prototype components from complete requirements 
 - `./scripts/bh fidelity` on the corrected rebuild recorded packet-derived cipher, extension, and ALPN observations and retained `approximate_not_verified` for the Chrome 150 target because a matching browser executable was unavailable. See `docs/capture_pilot_report.md` and decision 0004.
 - `UV_CACHE_DIR=/tmp/bh-uv-cache uv run --extra ml python -m unittest discover -s tests -q`: 28 unit tests passed after capture and fidelity changes. `git diff --check` passed. Real extraction was exercised against the saved PCAPs; an independent Wireshark/byte-level parser parity check remains outstanding.
 
+## Independent Go standard-library adapter on 2026-10-26
+
+- Added a local-only `go-stdlib` adapter using Go `net/http` and `crypto/tls`, plus the Python CLI/orchestrator bridge. The adapter loads the explicit lab CA, retains certificate and hostname verification, rejects non-loopback origins and redirects, bounds response bodies, validates server-provided task paths, and reports its negotiated protocol. It is an independently implemented ordinary browserless family, not Go `tls-client` and not a browser impersonator.
+- Added a reproducible `make go-client` build into the ignored `local/bin/` tree, Go unit tests for origin/session boundaries and protocol normalization, Python bridge tests for success and recorded child failure, development-plan coverage, and `docs/client_registry.md` with ancestry and claim limits.
+- `GOCACHE=/tmp/bh-go-build-cache go test ./...` in `clients/go_stdlib`: 3 tests passed. The default Go cache was read-only in the managed execution environment, so the verification used a temporary build cache.
+- `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m unittest discover -s tests -v`: 31 tests passed.
+- End-to-end local smoke run with Go `go1.26.9-X:nodwarf5`: all five routes returned HTTP 200, the task oracle reported success, and both the adapter and server events reported HTTP/2. Server evidence recorded TLS 1.3 with `TLS_AES_256_GCM_SHA384`, one persistent connection, streams 1/3/5/7/9, 54 events, zero dropped events, and a complete run manifest. This run did not include packet capture and is not a final-test observation.
+- A separate negative smoke check supplied the system CA bundle instead of the lab CA. The Go client exited nonzero before any task request and reported `x509: certificate signed by unknown authority`, confirming that the adapter did not disable certificate verification.
+- The Go family is implemented and available to development plans, but it has not been added to or evaluated on a locked research cohort. The reserved final test remains unopened.
+
+## Expanded automated development cohort on 2026-10-26
+
+- Added `configs/development_experiment_v3.json`, `bh experiment develop`, the strict development measurement gate, gate tests, decision 0005, and `docs/data_collection_plan.md`. The frozen schedule assigned 100 sessions: Firefox 20 train/20 validation, Python stdlib 20 train, Go stdlib 20 train, and curl-cffi `chrome150` 20 validation. The reserved final test was not collected.
+- `sg wireshark -c './scripts/bh capture doctor'` confirmed loopback capture and TShark 4.6.9 field inventory. `sg wireshark -c './scripts/bh experiment develop'` completed in 667.19 seconds end to end. It saved 100/100 successful task attempts and 100/100 PCAPs. Dumpcap reported 4,737 received packets and zero drops. TShark extraction and scoped joining produced 100/100 packet-complete session rows and zero event-only fallback rows. The gate passed.
+- The automation trained logistic regression and random forest for TLS-only (7 features), TLS plus HTTP/2 (11), and full (19) on 60 train rows, choosing thresholds on 40 validation rows. Every model/group had validation `tn=20, fp=0, fn=0, tp=20`; `test_rows_read=0`. The constant majority rule had 20 browser false positives, and the fixed non-H2 rule missed 20 curl-cffi sessions. These are model-selection checks on one Firefox build and one validation impersonation profile, not detector performance estimates. No group improved over TLS-only in this cohort.
+- A timed repeat of the full-feature fit took 1.29 seconds wall time on this host; collection and extraction accounted for nearly all of the 667-second pipeline run. `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m unittest discover -s tests -q`: 33 tests passed. `GOCACHE=/tmp/bh-go-build-cache make test-go-client`: 3 tests passed. `git diff --check` passed.
+- See `docs/development_v3_report.md` for cohort counts, model comparison, artifact locations, and claim limits. Matching Chrome parity, a held-out strong impersonator, independent browser build, task/path shifts, parser parity, reliable process-cost accounting, and final uncertainty analysis remain outstanding.
+
 ## Remaining work before the project can claim Phases 0–12 acceptance
 
 1. Replace or formally amend the Phase 3 `asyncio`/`h11` requirement and finish negative TLS/HTTP correctness tests.
 2. Complete H2 concurrent-stream, reset, decoder-comparison, and protocol-error tests.
 3. Expand tasks and persist run/session manifests and oracle outcomes.
 4. Independently validate TShark extraction and TCP option/ClientHello fields against Wireshark or packet bytes, and repeat capture-health checks under shifted environments. The corrected local pilot now has host capture capability, zero reported drops, and 40/40 complete unique joins.
-5. Add independently implemented Go/Rust adapters and a third independent browserless family; current cohorts do not support final held-out evaluation. Obtain a real Chrome version that matches the curl-cffi profile for fidelity testing.
+5. Add an independently implemented strong-impersonation Go/Rust adapter and collect a locked third-family cohort; the new ordinary Go `net/http` adapter is independent but does not imitate a browser, and current cohorts still do not support final held-out evaluation. Obtain a real Chrome version that matches the curl-cffi profile for fidelity testing.
 6. Complete cutoff-aware and site-independent feature groups, bounded grouped model search, uncertainty reporting, and reliable per-process cost measurement. TLS-only, TLS plus HTTP/2, and full development models, plus protocol-rule and majority baselines, are available on the corrected pilot.
+
+## Stage 0 and stage 1 runners on 2026-10-27
+
+- Added `imitation_stage` to attempt and label metadata, preserving the feature allowlist. Experiment plans pair stage conditions with the same deterministic task seed and pair ID. Added `configs/stages_0_1_development.json` for a 60-session development schedule: Firefox references, curl_cffi stages 0/1 in train, and Go client stages 0/1 in validation.
+- Stage 0 uses curl_cffi defaults without a profile or added browser headers and Go `net/http` defaults. Stage 1 uses curl_cffi `chrome150` or Go `tls-client` v1.16.0 `Chrome_150`, with HTTP/3 disabled and the declared Chrome-like header template. The Go comparison changes the client library between stages; its effect cannot be attributed to the profile alone. Stage 1 profile names are targets, not proof of parity.
+- Added `clients/go_tls_client/` with pinned Go module dependency, verified local CA roots, loopback-only origin checks, task runner, version reporting, and build/test targets. The adapter keeps certificate verification enabled.
+- Local smoke checks (no dataset collection) completed all five task routes using curl_cffi stage 0 (`h2`), curl_cffi stage 1 (`h2`), Go `net/http` stage 0 (`h2`), and Go tls-client stage 1 (`h2`). Supplying the system CA bundle instead of the lab CA made Go tls-client fail with `x509: certificate signed by unknown authority` before any task request.
+- `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m unittest discover -s tests -q`: 35 tests passed. In `clients/go_tls_client`, `GOCACHE=/tmp/bh-go-tls-build-cache GOMODCACHE=/tmp/bh-go-tls-mod-cache go mod tidy`, `go test ./...`, and `go build -trimpath -o ../../local/bin/bh-go-tls-client .`: succeeded. `GOCACHE=/tmp/bh-go-build-cache go test ./...` in `clients/go_stdlib`: passed. `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m beyond_handshake.cli experiment plan --config configs/stages_0_1_development.json --output /tmp/stages-0-1-plan-final.json >/dev/null`: generated the 60-session plan. `git diff --check`: passed.
+- Not run: the 60-session capture/collection schedule and model training. No Chrome/Chromium binary is installed, so real Chrome parity is unverified. The second task, independent fidelity audit, and per-client resource-cost measurement also remain outstanding. This implementation is stage-runner and schedule wiring, not research-core or phase acceptance evidence.

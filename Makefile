@@ -1,4 +1,4 @@
-.PHONY: doctor server cert test-unit capture-doctor
+.PHONY: doctor server cert test-unit capture-doctor go-client test-go-client go-tls-client test-go-tls-client
 
 doctor:
 	./scripts/bh doctor
@@ -14,3 +14,17 @@ test-unit:
 
 capture-doctor:
 	./scripts/bh capture doctor
+
+go-client:
+	mkdir -p local/bin
+	cd clients/go_stdlib && go build -trimpath -o ../../local/bin/bh-go-client .
+
+test-go-client:
+	cd clients/go_stdlib && go test ./...
+
+go-tls-client:
+	mkdir -p local/bin
+	cd clients/go_tls_client && go build -trimpath -o ../../local/bin/bh-go-tls-client .
+
+test-go-tls-client:
+	cd clients/go_tls_client && go test ./...

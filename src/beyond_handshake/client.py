@@ -51,6 +51,7 @@ class ExecutionResult:
     steps: list[dict] = field(default_factory=list)
     failure_category: str | None = None
     error: str | None = None
+    imitation_stage: int | None = None
 
 
 class _PageParser(html.parser.HTMLParser):
@@ -86,27 +87,45 @@ def available_impersonation_profiles() -> list[str]:
 
 
 def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
-                  timeout_seconds: float, profile_name: str,
-                  control_port: int | None = None) -> ExecutionResult:
-    """Run the catalog task through one curl_cffi session using a real built-in profile."""
+                  timeout_seconds: float, profile_name: str | None,
+                  control_port: int | None = None, imitation_stage: int = 1) -> ExecutionResult:
+    """Run ordinary curl_cffi (stage 0) or an explicit browser profile (stage 1)."""
     try:
         from curl_cffi import __version__ as version
         from curl_cffi import requests
     except ImportError as exc:
         raise RuntimeError("optional dependency missing; install with `uv sync --extra impersonation`") from exc
-    profiles = available_impersonation_profiles()
-    if profile_name not in profiles:
-        raise ValueError(f"unsupported profile {profile_name!r}; available: {', '.join(profiles)}")
+    if imitation_stage not in (0, 1):
+        raise ValueError("curl_cffi supports imitation stages 0 and 1")
+    if imitation_stage == 0 and profile_name is not None:
+        raise ValueError("stage 0 must not select a browser impersonation profile")
+    if imitation_stage == 1:
+        if not profile_name:
+            raise ValueError("stage 1 requires an explicit curl_cffi browser profile")
+        profiles = available_impersonation_profiles()
+        if profile_name not in profiles:
+            raise ValueError(f"unsupported profile {profile_name!r}; available: {', '.join(profiles)}")
     _validate_local_origin(origin, ca_file)
     started = time.time_ns()
     mono_deadline = time.monotonic() + timeout_seconds
     attempt = ExecutionResult(uuid.uuid4().hex, session_id, "curl_cffi", version,
-                              "curl-impersonate", "curl_cffi → curl-impersonate → libcurl",
-                              profile_name, _claimed_version(profile_name), "script",
-                              started, started, False)
+                              "curl-impersonate", "curl_cffi → curl-impersonate → libcurl"
+                              if imitation_stage == 1 else "curl_cffi → libcurl (default settings)",
+                              profile_name, _claimed_version(profile_name) if profile_name else None, "script",
+                              started, started, False, imitation_stage=imitation_stage)
     base = origin.rstrip("/")
     try:
-        with requests.Session(impersonate=profile_name, verify=str(ca_file)) as client:
+        session_options = {"verify": str(ca_file)}
+        if imitation_stage == 1:
+            session_options["impersonate"] = profile_name
+        with requests.Session(**session_options) as client:
+            if imitation_stage == 1:
+                # Keep this header set explicit and versioned. It represents the
+                # request-header component of stage 1, not proof of Chrome parity.
+                client.headers.update({
+                    "User-Agent": _profile_user_agent(profile_name),
+                    "Accept-Language": "en-US,en;q=0.9",
+                })
             start_path = f"/s/{session_id}/start"
             response = client.get(base + start_path, timeout=_remaining(mono_deadline),
                                   allow_redirects=False)
@@ -167,7 +186,7 @@ def run_stdlib(session_id: str, origin: str, ca_file: Path, timeout_seconds: flo
     attempt = ExecutionResult(uuid.uuid4().hex, session_id, "stdlib-http.client",
                               platform.python_version(), "python-stdlib",
                               "Python http.client / ssl", None, None, "script",
-                              started, started, False)
+                              started, started, False, imitation_stage=0)
     parsed_origin = urllib.parse.urlsplit(origin)
     host = parsed_origin.hostname or "localhost"
     port = parsed_origin.port or 443
@@ -219,6 +238,84 @@ def run_stdlib(session_id: str, origin: str, ca_file: Path, timeout_seconds: flo
         attempt.error = f"{type(exc).__name__}: {exc}"
     finally:
         connection.close()
+        attempt.end_wall_ns = time.time_ns()
+    return attempt
+
+
+def run_go_stdlib(session_id: str, origin: str, ca_file: Path, timeout_seconds: float,
+                  control_port: int | None = None, binary_path: Path | None = None) -> ExecutionResult:
+    """Run the same task with Go's independent net/http and crypto/tls stack."""
+    _validate_local_origin(origin, ca_file)
+    binary = binary_path or Path(__file__).resolve().parents[2] / "local/bin/bh-go-client"
+    if not binary.is_file():
+        raise RuntimeError("Go adapter is not built; run `go build -o ../../local/bin/bh-go-client .` "
+                           "from clients/go_stdlib")
+    version = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=5)
+    if version.returncode:
+        raise RuntimeError("could not query Go adapter version")
+    started = time.time_ns()
+    attempt = ExecutionResult(uuid.uuid4().hex, session_id, "go-stdlib",
+                              version.stdout.strip(), "go-net-http", "Go net/http / crypto/tls",
+                              None, None, "script", started, started, False, imitation_stage=0)
+    try:
+        completed = subprocess.run([str(binary), "--session", session_id, "--origin", origin,
+                                    "--ca", str(ca_file.resolve()), "--timeout", f"{timeout_seconds}s"],
+                                   capture_output=True, text=True, timeout=timeout_seconds + 5)
+        result = json.loads(completed.stdout)
+        attempt.steps = result.get("steps", [])
+        attempt.observed_protocol = result.get("protocol")
+        if completed.returncode or result.get("error"):
+            raise ValueError(result.get("error") or f"Go adapter exited {completed.returncode}")
+        port = int(urllib.parse.urlsplit(origin).port or 443)
+        outcome = read_task_outcome(session_id, control_port or port + 1)
+        attempt.task_success = bool(outcome["task_success"])
+        if not attempt.task_success:
+            attempt.failure_category = "oracle_failure"
+    except Exception as exc:
+        attempt.failure_category = _failure_category(exc)
+        attempt.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        attempt.end_wall_ns = time.time_ns()
+    return attempt
+
+
+def run_go_tls_client(session_id: str, origin: str, ca_file: Path, timeout_seconds: float,
+                      profile_name: str, control_port: int | None = None,
+                      binary_path: Path | None = None) -> ExecutionResult:
+    """Run the pinned Go tls-client browser-profile adapter (stage 1)."""
+    _validate_local_origin(origin, ca_file)
+    if profile_name != "chrome_150":
+        raise ValueError("Go tls-client currently supports only the pinned chrome_150 stage-1 profile")
+    binary = binary_path or Path(__file__).resolve().parents[2] / "local/bin/bh-go-tls-client"
+    if not binary.is_file():
+        raise RuntimeError("Go tls-client adapter is not built; run `make go-tls-client`")
+    version = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=5)
+    if version.returncode:
+        raise RuntimeError("could not query Go tls-client adapter version")
+    started = time.time_ns()
+    attempt = ExecutionResult(uuid.uuid4().hex, session_id, "go-tls-client", version.stdout.strip(),
+                              "go-tls-client", "Go tls-client → fhttp / uTLS", profile_name,
+                              "Chrome 150 profile target", "script", started, started, False,
+                              imitation_stage=1)
+    try:
+        completed = subprocess.run([str(binary), "--session", session_id, "--origin", origin,
+                                    "--ca", str(ca_file.resolve()), "--timeout", f"{timeout_seconds}s",
+                                    "--profile", profile_name], capture_output=True, text=True,
+                                   timeout=timeout_seconds + 5)
+        result = json.loads(completed.stdout)
+        attempt.steps = result.get("steps", [])
+        attempt.observed_protocol = result.get("protocol")
+        if completed.returncode or result.get("error"):
+            raise ValueError(result.get("error") or f"Go tls-client exited {completed.returncode}")
+        port = int(urllib.parse.urlsplit(origin).port or 443)
+        outcome = read_task_outcome(session_id, control_port or port + 1)
+        attempt.task_success = bool(outcome["task_success"])
+        if not attempt.task_success:
+            attempt.failure_category = "oracle_failure"
+    except Exception as exc:
+        attempt.failure_category = _failure_category(exc)
+        attempt.error = f"{type(exc).__name__}: {exc}"
+    finally:
         attempt.end_wall_ns = time.time_ns()
     return attempt
 
@@ -367,12 +464,25 @@ def _validate_local_origin(origin: str, ca_file: Path) -> None:
         raise FileNotFoundError(f"trusted lab CA not found: {ca_file}")
 
 
-def _claimed_version(profile: str) -> str | None:
+def _claimed_version(profile: str | None) -> str | None:
+    if not profile:
+        return None
     for prefix in ("chrome", "edge", "firefox", "safari", "tor"):
         if profile.startswith(prefix):
             suffix = profile[len(prefix):].lstrip("_a")
             return suffix or None
     return None
+
+
+def _profile_user_agent(profile: str | None) -> str:
+    if profile and profile.startswith("chrome"):
+        version = _claimed_version(profile) or "150"
+        return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                f"(KHTML, like Gecko) Chrome/{version}.0.0.0 Safari/537.36")
+    if profile and profile.startswith("firefox"):
+        version = _claimed_version(profile) or ""
+        return f"Mozilla/5.0 (X11; Linux x86_64; rv:{version}) Gecko/20100101 Firefox/{version}"
+    raise ValueError(f"no pinned request-header template for profile {profile!r}")
 
 
 def _response_protocol(response: object) -> str | None:

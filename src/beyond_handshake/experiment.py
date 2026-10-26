@@ -16,7 +16,8 @@ from pathlib import Path
 from beyond_handshake.capture import (capture_loopback, features_from_server_events,
                                       join_and_aggregate, parse_capture_health,
                                       tshark_extract)
-from beyond_handshake.client import run_curl_cffi, run_firefox, run_stdlib, write_attempt
+from beyond_handshake.client import (run_curl_cffi, run_firefox, run_go_stdlib,
+                                     run_go_tls_client, run_stdlib, write_attempt)
 from beyond_handshake.config import load_server_config
 from beyond_handshake.dataset import build_dataset
 
@@ -34,27 +35,46 @@ def plan_experiment(config_path: Path, output_path: Path) -> dict:
         raise ValueError("at least one client must be configured")
     episodes = []
     for client in clients:
-        if client.get("adapter") not in {"firefox", "stdlib", "curl-cffi"}:
+        if client.get("adapter") not in {"firefox", "stdlib", "curl-cffi", "go-stdlib",
+                                          "go-tls-client"}:
             raise ValueError(f"unsupported adapter in plan: {client.get('adapter')}")
         if client.get("execution_stack") not in {"browser", "browserless"}:
             raise ValueError("client execution_stack must be browser or browserless")
         if not client.get("client_family") or not client.get("partitions"):
             raise ValueError("each client needs client_family and partitions")
+        stage = client.get("imitation_stage")
+        if stage is not None and stage not in (0, 1):
+            raise ValueError("imitation_stage must be 0 or 1")
+        if client.get("adapter") == "go-tls-client" and stage != 1:
+            raise ValueError("go-tls-client currently implements stage 1 only")
+        if client.get("adapter") == "go-tls-client" and client.get("profile") != "chrome_150":
+            raise ValueError("go-tls-client currently requires the pinned chrome_150 profile")
+        if client.get("adapter") == "go-stdlib" and stage == 1:
+            raise ValueError("go-stdlib is the stage-0 control; use go-tls-client for stage 1")
+        if client.get("adapter") == "curl-cffi":
+            if stage == 0 and client.get("profile") is not None:
+                raise ValueError("curl-cffi stage 0 cannot select a browser profile")
+            if stage == 1 and not client.get("profile"):
+                raise ValueError("curl-cffi stage 1 requires a browser profile")
         for partition in client["partitions"]:
             if partition not in {"train", "validation"}:
                 raise ValueError("collection plan only permits train/validation; final test stays sealed")
             for repeat in range(repeats):
                 identity = f"{config['experiment_id']}:{client['name']}:{partition}:{repeat}"
+                task_identity = f"{config['experiment_id']}:{partition}:{repeat}:{config.get('task_id', 'catalog-search-detail-save-v1')}"
+                pair_identity = f"{config['experiment_id']}:{client['client_family']}:{partition}:{repeat}"
                 session_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
                 episode = {"episode_id": uuid.uuid5(uuid.NAMESPACE_DNS, identity).hex,
                            "session_id": session_id, "client_name": client["name"],
                            "adapter": client["adapter"], "client_family": client["client_family"],
                            "execution_stack": client["execution_stack"],
                            "controller": client.get("controller", "script"),
-                           "profile": client.get("profile"), "partition": partition,
-                           "repeat": repeat, "task_seed": random.Random(identity).randrange(2**31),
+                           "profile": client.get("profile"),
+                           "imitation_stage": stage, "partition": partition,
+                           "repeat": repeat, "task_seed": random.Random(task_identity).randrange(2**31),
                            "task_id": config.get("task_id", "catalog-search-detail-save-v1"),
                            "profile_group_id": uuid.uuid5(uuid.NAMESPACE_OID, identity).hex,
+                           "pair_id": uuid.uuid5(uuid.NAMESPACE_DNS, pair_identity).hex,
                            "capture_block_id": f"{config['experiment_id']}:{partition}:{repeat}"}
                 episodes.append(episode)
     random.Random(seed).shuffle(episodes)
@@ -151,11 +171,16 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
             elif adapter == "stdlib":
                 attempt = run_stdlib(episode["session_id"], origin, ca_file, timeout,
                                      server_config.control_port)
+            elif adapter == "go-stdlib":
+                attempt = run_go_stdlib(episode["session_id"], origin, ca_file, timeout,
+                                        server_config.control_port)
+            elif adapter == "go-tls-client":
+                attempt = run_go_tls_client(episode["session_id"], origin, ca_file, timeout,
+                    episode["profile"], server_config.control_port)
             else:
-                if not episode.get("profile"):
-                    raise ValueError("curl-cffi plan entry must declare profile")
                 attempt = run_curl_cffi(episode["session_id"], origin, ca_file, timeout,
-                                        episode["profile"], server_config.control_port)
+                    episode.get("profile"), server_config.control_port,
+                    episode.get("imitation_stage", 1))
         except Exception as exc:
             # A setup error remains a visible attempt and never vanishes from the schedule.
             from beyond_handshake.client import ExecutionResult
@@ -165,6 +190,7 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
                 "unknown", episode["client_family"], "unresolved", episode.get("profile"), None,
                 episode["controller"], started, now, False, failure_category="setup_failure",
                 error=f"{type(exc).__name__}: {exc}")
+        attempt.imitation_stage = episode.get("imitation_stage")
         cpu_ns = time.process_time_ns() - cpu_start
         rss_after = _rss_bytes()
         record("draining")
@@ -192,7 +218,9 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
                        "client_family": episode["client_family"], "controller": episode["controller"],
                        "partition": episode["partition"], "task_id": episode["task_id"],
                        "profile_group_id": episode["profile_group_id"],
+                       "imitation_stage": episode.get("imitation_stage"),
                        "capture_block_id": episode["capture_block_id"],
+                       "pair_id": episode["pair_id"],
                        "task_success": attempt.task_success,
                        "attempt_status": "complete" if attempt.error is None else "failed"})
         with results_path.open("a", encoding="utf-8") as stream:
