@@ -45,8 +45,8 @@ def plan_experiment(config_path: Path, output_path: Path) -> dict:
         stage = client.get("imitation_stage")
         if stage is not None and stage not in (0, 1, 2, 3):
             raise ValueError("imitation_stage must be one of 0, 1, 2, or 3")
-        if client.get("adapter") == "go-tls-client" and stage != 1:
-            raise ValueError("go-tls-client currently implements stage 1 only")
+        if client.get("adapter") == "go-tls-client" and stage not in (1, 2, 3):
+            raise ValueError("go-tls-client implements imitation stages 1 through 3")
         if client.get("adapter") == "go-tls-client" and client.get("profile") != "chrome_150":
             raise ValueError("go-tls-client currently requires the pinned chrome_150 profile")
         if client.get("adapter") == "go-stdlib" and stage == 1:
@@ -178,7 +178,8 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
                                         server_config.control_port)
             elif adapter == "go-tls-client":
                 attempt = run_go_tls_client(episode["session_id"], origin, ca_file, timeout,
-                    episode["profile"], server_config.control_port)
+                    episode["profile"], server_config.control_port,
+                    imitation_stage=episode.get("imitation_stage", 1))
             else:
                 attempt = run_curl_cffi(episode["session_id"], origin, ca_file, timeout,
                     episode.get("profile"), server_config.control_port,

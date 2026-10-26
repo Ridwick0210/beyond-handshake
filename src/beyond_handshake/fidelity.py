@@ -28,7 +28,8 @@ def fidelity_report(features_path: Path, labels_path: Path, output_path: Path) -
                 by_client[client][dimension][value] += 1
     comparisons = []
     for actual, profile, expected_target in (
-        ("mozilla-firefox", "curl-impersonate", "Chrome 150 (curl-cffi profile target)"),):
+        ("mozilla-firefox", "curl-impersonate", "Chrome 150 (curl-cffi profile target)"),
+        ("mozilla-firefox", "go-client-family", "Chrome 150 (Go tls-client profile target)")):
         actual_features = by_client.get(actual, {})
         profile_features = by_client.get(profile, {})
         details = []

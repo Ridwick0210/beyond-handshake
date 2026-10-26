@@ -146,7 +146,7 @@ def _discover_and_fetch_resources(client: object, page: object, base: str, sessi
 
 def _cache_max_age(header: str) -> int:
     directives = [part.strip().lower() for part in header.split(",")]
-    if "no-store" in directives or "private" in directives:
+    if "no-store" in directives or "private" in directives or "no-cache" in directives:
         return 0
     match = re.fullmatch(r"max-age\s*=\s*(\d+)", next(
         (part for part in directives if part.startswith("max-age")), ""))
@@ -197,8 +197,7 @@ def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
         "http_cache": imitation_stage >= 3,
         "task_pacing": False,
         "stage_contrast_note": (
-            "I2 is not distinct from I1 for this adapter: requests.Session already retains cookies "
-            "and reuses connections; no additional toggle is introduced."
+            "I2 adds a second task visit, but no new session-state toggle over I1."
             if imitation_stage == 2 else None
         ),
     }
@@ -216,53 +215,59 @@ def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
                     "User-Agent": _profile_user_agent(profile_name),
                     "Accept-Language": "en-US,en;q=0.9",
                 })
-            start_path = f"/s/{session_id}/start"
-            response = client.get(base + start_path, timeout=_remaining(mono_deadline),
-                                  allow_redirects=False)
-            _require_ok(response.status_code)
-            attempt.steps.append({"route": "start", "status": response.status_code})
             resource_cache: dict[str, tuple[bytes, float]] = {}
-            if imitation_stage >= 3:
-                _discover_and_fetch_resources(client, response, base, session_id,
-                                              mono_deadline, resource_cache,
-                                              attempt.resource_metrics)
-            parser = _PageParser()
-            parser.feed(response.text)
-            if not parser.bold_text:
-                raise ValueError("start page did not contain the task search term")
-            term = " ".join(x for x in parser.bold_text if x)
-            search_url = base + f"/s/{session_id}/api/search?" + urllib.parse.urlencode({"q": term})
-            response = client.get(search_url, timeout=_remaining(mono_deadline),
-                                  allow_redirects=False)
-            _require_ok(response.status_code)
-            items = response.json().get("items", [])
-            if len(items) != 1:
-                raise ValueError("search did not return exactly one catalog item")
-            attempt.steps.append({"route": "search_api", "status": response.status_code})
-            item_path = _validated_item_path(items[0]["url"], session_id)
-            response = client.get(base + item_path,
-                                  timeout=_remaining(mono_deadline), allow_redirects=False)
-            _require_ok(response.status_code)
-            if imitation_stage >= 3:
-                _discover_and_fetch_resources(client, response, base, session_id,
-                                              mono_deadline, resource_cache,
-                                              attempt.resource_metrics)
-            parser = _PageParser()
-            parser.feed(response.text)
-            item_id, nonce = parser.inputs.get("item_id"), parser.inputs.get("nonce")
-            if not item_id or not nonce:
-                raise ValueError("detail page did not contain the task's save fields")
-            attempt.steps.append({"route": "detail", "status": response.status_code})
-            response = client.post(base + f"/s/{session_id}/api/save",
-                                   data={"item_id": item_id, "nonce": nonce},
-                                   timeout=_remaining(mono_deadline), allow_redirects=False)
-            _require_ok(response.status_code)
-            attempt.steps.append({"route": "save_api", "status": response.status_code})
-            response = client.get(base + f"/s/{session_id}/complete",
-                                  timeout=_remaining(mono_deadline), allow_redirects=False)
-            _require_ok(response.status_code)
-            attempt.steps.append({"route": "confirmation", "status": response.status_code})
-            attempt.observed_protocol = _response_protocol(response)
+            visits = 2 if imitation_stage >= 2 else 1
+            for visit in range(1, visits + 1):
+                response = client.get(base + f"/s/{session_id}/start",
+                                      timeout=_remaining(mono_deadline), allow_redirects=False)
+                _require_ok(response.status_code)
+                attempt.steps.append({"route": "start", "status": response.status_code,
+                                      "visit": visit})
+                if imitation_stage >= 3:
+                    _discover_and_fetch_resources(client, response, base, session_id,
+                                                  mono_deadline, resource_cache,
+                                                  attempt.resource_metrics)
+                parser = _PageParser()
+                parser.feed(response.text)
+                if not parser.bold_text:
+                    raise ValueError("start page did not contain the task search term")
+                term = " ".join(x for x in parser.bold_text if x)
+                search_url = base + f"/s/{session_id}/api/search?" + urllib.parse.urlencode({"q": term})
+                response = client.get(search_url, timeout=_remaining(mono_deadline),
+                                      allow_redirects=False)
+                _require_ok(response.status_code)
+                items = response.json().get("items", [])
+                if len(items) != 1:
+                    raise ValueError("search did not return exactly one catalog item")
+                attempt.steps.append({"route": "search_api", "status": response.status_code,
+                                      "visit": visit})
+                item_path = _validated_item_path(items[0]["url"], session_id)
+                response = client.get(base + item_path, timeout=_remaining(mono_deadline),
+                                      allow_redirects=False)
+                _require_ok(response.status_code)
+                if imitation_stage >= 3:
+                    _discover_and_fetch_resources(client, response, base, session_id,
+                                                  mono_deadline, resource_cache,
+                                                  attempt.resource_metrics)
+                parser = _PageParser()
+                parser.feed(response.text)
+                item_id, nonce = parser.inputs.get("item_id"), parser.inputs.get("nonce")
+                if not item_id or not nonce:
+                    raise ValueError("detail page did not contain the task's save fields")
+                attempt.steps.append({"route": "detail", "status": response.status_code,
+                                      "visit": visit})
+                response = client.post(base + f"/s/{session_id}/api/save",
+                                       data={"item_id": item_id, "nonce": nonce},
+                                       timeout=_remaining(mono_deadline), allow_redirects=False)
+                _require_ok(response.status_code)
+                attempt.steps.append({"route": "save_api", "status": response.status_code,
+                                      "visit": visit})
+                response = client.get(base + f"/s/{session_id}/complete",
+                                      timeout=_remaining(mono_deadline), allow_redirects=False)
+                _require_ok(response.status_code)
+                attempt.steps.append({"route": "confirmation", "status": response.status_code,
+                                      "visit": visit})
+                attempt.observed_protocol = _response_protocol(response)
         task_port = int(urllib.parse.urlsplit(origin).port or 443)
         outcome = read_task_outcome(session_id, control_port or task_port + 1)
         attempt.task_success = bool(outcome["task_success"])
@@ -380,11 +385,11 @@ def run_go_stdlib(session_id: str, origin: str, ca_file: Path, timeout_seconds: 
 
 def run_go_tls_client(session_id: str, origin: str, ca_file: Path, timeout_seconds: float,
                       profile_name: str, control_port: int | None = None,
-                      binary_path: Path | None = None) -> ExecutionResult:
-    """Run the pinned Go tls-client browser-profile adapter (stage 1)."""
+                      binary_path: Path | None = None, imitation_stage: int = 1) -> ExecutionResult:
+    """Run the pinned Go tls-client browser-profile adapter (stages 1 through 3)."""
     _validate_local_origin(origin, ca_file)
-    if profile_name != "chrome_150":
-        raise ValueError("Go tls-client currently supports only the pinned chrome_150 stage-1 profile")
+    if profile_name != "chrome_150" or imitation_stage not in (1, 2, 3):
+        raise ValueError("Go tls-client requires chrome_150 and imitation stage 1, 2, or 3")
     binary = binary_path or Path(__file__).resolve().parents[2] / "local/bin/bh-go-tls-client"
     if not binary.is_file():
         raise RuntimeError("Go tls-client adapter is not built; run `make go-tls-client`")
@@ -395,15 +400,25 @@ def run_go_tls_client(session_id: str, origin: str, ca_file: Path, timeout_secon
     attempt = ExecutionResult(uuid.uuid4().hex, session_id, "go-tls-client", version.stdout.strip(),
                               "go-tls-client", "Go tls-client → fhttp / uTLS", profile_name,
                               "Chrome 150 profile target", "script", started, started, False,
-                              imitation_stage=1)
+                              imitation_stage=imitation_stage,
+                              capabilities={"tls_profile": True, "h2_profile": True,
+                                  "persistent_connections": True, "cookie_jar": False,
+                                  "resource_discovery": imitation_stage >= 3,
+                                  "http_cache": imitation_stage >= 3, "task_pacing": False,
+                                  "stage_contrast_note": (
+                                      "I2 adds a second task visit; it does not add a cookie-jar or connection-reuse toggle."
+                                      if imitation_stage == 2 else None)},
+                              resource_metrics={"discovered": 0, "network_fetches": 0, "cache_hits": 0})
     try:
         completed = subprocess.run([str(binary), "--session", session_id, "--origin", origin,
                                     "--ca", str(ca_file.resolve()), "--timeout", f"{timeout_seconds}s",
-                                    "--profile", profile_name], capture_output=True, text=True,
+                                    "--profile", profile_name, "--stage", str(imitation_stage)],
+                                   capture_output=True, text=True,
                                    timeout=timeout_seconds + 5)
         result = json.loads(completed.stdout)
         attempt.steps = result.get("steps", [])
         attempt.observed_protocol = result.get("protocol")
+        attempt.resource_metrics = result.get("resource_metrics", attempt.resource_metrics)
         if completed.returncode or result.get("error"):
             raise ValueError(result.get("error") or f"Go tls-client exited {completed.returncode}")
         port = int(urllib.parse.urlsplit(origin).port or 443)

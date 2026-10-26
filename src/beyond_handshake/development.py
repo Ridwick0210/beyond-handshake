@@ -56,7 +56,7 @@ def _preflight(config_path: Path, output_root: Path, model_root: Path,
     if "curl-cffi" in adapters:
         available = set(available_impersonation_profiles())
         for client in config["clients"]:
-            if (client.get("adapter") == "curl-cffi" and client.get("imitation_stage", 1) == 1
+            if (client.get("adapter") == "curl-cffi" and client.get("imitation_stage", 1) in (1, 2, 3)
                     and client.get("profile") not in available):
                 raise RuntimeError(f"unsupported curl-cffi profile: {client.get('profile')}")
     if importlib.util.find_spec("sklearn") is None:

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "experiment_id": "local-imitation-stages-2-3-dev-v1",
+  "experiment_id": "local-imitation-stages-2-3-warm-cache-dev-v3",
   "seed": 20261027,
   "task_id": "catalog-search-detail-save-v1",
   "origin": "https://localhost:8443",
@@ -38,13 +38,23 @@
       "partitions": ["train"]
     },
     {
-      "name": "go-tls-client-chrome150-i1",
+      "name": "go-tls-client-chrome150-i2",
       "adapter": "go-tls-client",
       "client_family": "go-client-family",
       "execution_stack": "browserless",
       "controller": "script",
       "profile": "chrome_150",
-      "imitation_stage": 1,
+      "imitation_stage": 2,
+      "partitions": ["validation"]
+    },
+    {
+      "name": "go-tls-client-chrome150-i3",
+      "adapter": "go-tls-client",
+      "client_family": "go-client-family",
+      "execution_stack": "browserless",
+      "controller": "script",
+      "profile": "chrome_150",
+      "imitation_stage": 3,
       "partitions": ["validation"]
     }
   ],

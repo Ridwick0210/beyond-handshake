@@ -286,11 +286,12 @@ def _client(args: argparse.Namespace) -> int:
             result = run_go_stdlib(args.session_id, args.origin, args.ca_file,
                                    args.timeout, args.control_port)
         elif args.adapter == "go-tls-client":
-            if args.stage != 1 or not args.profile:
-                print("go-tls-client requires --stage 1 and --profile chrome_150", file=sys.stderr)
+            if args.stage not in (1, 2, 3) or not args.profile:
+                print("go-tls-client requires --stage 1, 2, or 3 and --profile chrome_150", file=sys.stderr)
                 return 2
             result = run_go_tls_client(args.session_id, args.origin, args.ca_file,
-                                       args.timeout, args.profile, args.control_port)
+                                       args.timeout, args.profile, args.control_port,
+                                       imitation_stage=args.stage)
         else:
             stage = 1 if args.stage is None else args.stage
             if stage not in (0, 1, 2, 3):
