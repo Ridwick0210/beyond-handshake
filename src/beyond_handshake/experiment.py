@@ -43,19 +43,21 @@ def plan_experiment(config_path: Path, output_path: Path) -> dict:
         if not client.get("client_family") or not client.get("partitions"):
             raise ValueError("each client needs client_family and partitions")
         stage = client.get("imitation_stage")
-        if stage is not None and stage not in (0, 1):
-            raise ValueError("imitation_stage must be 0 or 1")
+        if stage is not None and stage not in (0, 1, 2, 3):
+            raise ValueError("imitation_stage must be one of 0, 1, 2, or 3")
         if client.get("adapter") == "go-tls-client" and stage != 1:
             raise ValueError("go-tls-client currently implements stage 1 only")
         if client.get("adapter") == "go-tls-client" and client.get("profile") != "chrome_150":
             raise ValueError("go-tls-client currently requires the pinned chrome_150 profile")
         if client.get("adapter") == "go-stdlib" and stage == 1:
             raise ValueError("go-stdlib is the stage-0 control; use go-tls-client for stage 1")
+        if client.get("adapter") in {"stdlib", "go-stdlib"} and stage not in (None, 0):
+            raise ValueError("ordinary stdlib adapters only implement stage 0")
         if client.get("adapter") == "curl-cffi":
             if stage == 0 and client.get("profile") is not None:
                 raise ValueError("curl-cffi stage 0 cannot select a browser profile")
-            if stage == 1 and not client.get("profile"):
-                raise ValueError("curl-cffi stage 1 requires a browser profile")
+            if stage in (1, 2, 3) and not client.get("profile"):
+                raise ValueError("curl-cffi stages 1 through 3 require a browser profile")
         for partition in client["partitions"]:
             if partition not in {"train", "validation"}:
                 raise ValueError("collection plan only permits train/validation; final test stays sealed")

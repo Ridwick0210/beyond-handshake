@@ -106,6 +106,22 @@ class ExperimentPlanningTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stage 0"):
                 plan_experiment(config, root / "plan.json")
 
+    def test_stage_2_3_plan_keeps_curl_family_in_one_partition_and_pairs_seeds(self):
+        config = Path(__file__).resolve().parents[1] / "configs/stages_2_3_development.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = plan_experiment(config, Path(tmp) / "plan.json")
+
+        episodes = plan["episodes"]
+        self.assertEqual(len(episodes), 50)
+        curl_rows = [row for row in episodes if row["client_family"] == "curl-impersonate"]
+        self.assertEqual({row["imitation_stage"] for row in curl_rows}, {2, 3})
+        self.assertEqual({row["partition"] for row in curl_rows}, {"train"})
+        for repeat in range(10):
+            pair = [row for row in curl_rows if row["repeat"] == repeat]
+            self.assertEqual(len(pair), 2)
+            self.assertEqual({row["task_seed"] for row in pair}, {pair[0]["task_seed"]})
+            self.assertEqual({row["pair_id"] for row in pair}, {pair[0]["pair_id"]})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ from uuid import uuid4
 from beyond_handshake.config import ServerConfig
 from beyond_handshake.control import ControlServer
 from beyond_handshake.event_writer import EventWriter
-from beyond_handshake.tasks import TaskOracle
+from beyond_handshake.tasks import TaskOracle, cache_control_for_route
 
 LOGGER = logging.getLogger("beyond_handshake.server")
 _SESSION_ROUTE = re.compile(r"^/s/([A-Za-z0-9_-]{1,80})(?:/|$)")
@@ -153,7 +153,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     session_id=getattr(self, "_session_id", None))
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control_for_route(route))
         if close:
             self.send_header("Connection", "close")
             self.close_connection = True

@@ -6,6 +6,7 @@ import http.client
 import html.parser
 import json
 import hashlib
+import re
 import platform
 import shutil
 import ssl
@@ -52,6 +53,8 @@ class ExecutionResult:
     failure_category: str | None = None
     error: str | None = None
     imitation_stage: int | None = None
+    capabilities: dict = field(default_factory=dict)
+    resource_metrics: dict = field(default_factory=dict)
 
 
 class _PageParser(html.parser.HTMLParser):
@@ -78,6 +81,78 @@ class _PageParser(html.parser.HTMLParser):
             self.bold_text.append(data.strip())
 
 
+class _ResourceParser(html.parser.HTMLParser):
+    """Collect ordinary resource references from the controlled task pages."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.resources: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "link" and "stylesheet" in (values.get("rel") or "").lower().split():
+            value = values.get("href")
+        elif tag in {"script", "img"}:
+            value = values.get("src")
+        else:
+            value = None
+        if value:
+            self.resources.append(value)
+
+
+def _discover_and_fetch_resources(client: object, page: object, base: str, session_id: str,
+                                  deadline: float, cache: dict[str, tuple[bytes, float]],
+                                  metrics: dict[str, int], limit: int = 32) -> None:
+    """Fetch bounded same-origin HTML/CSS resources, honoring explicit max-age."""
+    parser = _ResourceParser()
+    parser.feed(getattr(page, "text", ""))
+    queue = [urllib.parse.urljoin(getattr(page, "url", base + "/"), value)
+             for value in parser.resources]
+    seen: set[str] = set()
+    allowed_prefix = f"/s/{session_id}/assets/"
+    origin_parts = urllib.parse.urlsplit(base)
+    while queue and len(seen) < limit:
+        target = queue.pop(0)
+        parsed = urllib.parse.urlsplit(target)
+        normalized = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        metrics["discovered"] += 1
+        if (parsed.scheme != origin_parts.scheme or parsed.netloc != origin_parts.netloc
+                or not parsed.path.startswith(allowed_prefix) or parsed.username or parsed.password):
+            continue
+        now = time.monotonic()
+        cached = cache.get(normalized)
+        if cached and cached[1] > now:
+            body = cached[0]
+            metrics["cache_hits"] += 1
+        else:
+            response = client.get(normalized, timeout=_remaining(deadline), allow_redirects=False)
+            _require_ok(response.status_code)
+            body = bytes(response.content)
+            metrics["network_fetches"] += 1
+            max_age = _cache_max_age(response.headers.get("Cache-Control", ""))
+            if max_age:
+                cache[normalized] = (body, now + max_age)
+        if parsed.path.lower().endswith(".css"):
+            css = body.decode("utf-8", "replace")
+            css_refs = re.findall(r"url\(\s*(['\"]?)(.*?)\1\s*\)", css, re.I)
+            for _quote, value in css_refs:
+                value = value.strip()
+                if value and not value.startswith("data:"):
+                    queue.append(urllib.parse.urljoin(normalized, value))
+
+
+def _cache_max_age(header: str) -> int:
+    directives = [part.strip().lower() for part in header.split(",")]
+    if "no-store" in directives or "private" in directives:
+        return 0
+    match = re.fullmatch(r"max-age\s*=\s*(\d+)", next(
+        (part for part in directives if part.startswith("max-age")), ""))
+    return min(int(match.group(1)), 86_400) if match else 0
+
+
 def available_impersonation_profiles() -> list[str]:
     try:
         from curl_cffi.requests.impersonate import BrowserType
@@ -89,17 +164,17 @@ def available_impersonation_profiles() -> list[str]:
 def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
                   timeout_seconds: float, profile_name: str | None,
                   control_port: int | None = None, imitation_stage: int = 1) -> ExecutionResult:
-    """Run ordinary curl_cffi (stage 0) or an explicit browser profile (stage 1)."""
+    """Run the configured curl_cffi imitation stage against the local task only."""
     try:
         from curl_cffi import __version__ as version
         from curl_cffi import requests
     except ImportError as exc:
         raise RuntimeError("optional dependency missing; install with `uv sync --extra impersonation`") from exc
-    if imitation_stage not in (0, 1):
-        raise ValueError("curl_cffi supports imitation stages 0 and 1")
+    if imitation_stage not in (0, 1, 2, 3):
+        raise ValueError("curl_cffi supports imitation stages 0 through 3")
     if imitation_stage == 0 and profile_name is not None:
         raise ValueError("stage 0 must not select a browser impersonation profile")
-    if imitation_stage == 1:
+    if imitation_stage >= 1:
         if not profile_name:
             raise ValueError("stage 1 requires an explicit curl_cffi browser profile")
         profiles = available_impersonation_profiles()
@@ -110,16 +185,31 @@ def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
     mono_deadline = time.monotonic() + timeout_seconds
     attempt = ExecutionResult(uuid.uuid4().hex, session_id, "curl_cffi", version,
                               "curl-impersonate", "curl_cffi → curl-impersonate → libcurl"
-                              if imitation_stage == 1 else "curl_cffi → libcurl (default settings)",
+                              if imitation_stage >= 1 else "curl_cffi → libcurl (default settings)",
                               profile_name, _claimed_version(profile_name) if profile_name else None, "script",
                               started, started, False, imitation_stage=imitation_stage)
+    attempt.capabilities = {
+        "tls_profile": imitation_stage >= 1,
+        "h2_profile": imitation_stage >= 1,
+        "persistent_connections": imitation_stage >= 1,
+        "cookie_jar": imitation_stage >= 1,
+        "resource_discovery": imitation_stage >= 3,
+        "http_cache": imitation_stage >= 3,
+        "task_pacing": False,
+        "stage_contrast_note": (
+            "I2 is not distinct from I1 for this adapter: requests.Session already retains cookies "
+            "and reuses connections; no additional toggle is introduced."
+            if imitation_stage == 2 else None
+        ),
+    }
+    attempt.resource_metrics = {"discovered": 0, "network_fetches": 0, "cache_hits": 0}
     base = origin.rstrip("/")
     try:
         session_options = {"verify": str(ca_file)}
-        if imitation_stage == 1:
+        if imitation_stage >= 1:
             session_options["impersonate"] = profile_name
         with requests.Session(**session_options) as client:
-            if imitation_stage == 1:
+            if imitation_stage >= 1:
                 # Keep this header set explicit and versioned. It represents the
                 # request-header component of stage 1, not proof of Chrome parity.
                 client.headers.update({
@@ -131,6 +221,11 @@ def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
                                   allow_redirects=False)
             _require_ok(response.status_code)
             attempt.steps.append({"route": "start", "status": response.status_code})
+            resource_cache: dict[str, tuple[bytes, float]] = {}
+            if imitation_stage >= 3:
+                _discover_and_fetch_resources(client, response, base, session_id,
+                                              mono_deadline, resource_cache,
+                                              attempt.resource_metrics)
             parser = _PageParser()
             parser.feed(response.text)
             if not parser.bold_text:
@@ -148,6 +243,10 @@ def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
             response = client.get(base + item_path,
                                   timeout=_remaining(mono_deadline), allow_redirects=False)
             _require_ok(response.status_code)
+            if imitation_stage >= 3:
+                _discover_and_fetch_resources(client, response, base, session_id,
+                                              mono_deadline, resource_cache,
+                                              attempt.resource_metrics)
             parser = _PageParser()
             parser.feed(response.text)
             item_id, nonce = parser.inputs.get("item_id"), parser.inputs.get("nonce")

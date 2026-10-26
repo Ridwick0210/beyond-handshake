@@ -293,11 +293,11 @@ def _client(args: argparse.Namespace) -> int:
                                        args.timeout, args.profile, args.control_port)
         else:
             stage = 1 if args.stage is None else args.stage
-            if stage not in (0, 1):
-                print("--stage must be 0 or 1", file=sys.stderr)
+            if stage not in (0, 1, 2, 3):
+                print("curl-cffi --stage must be 0, 1, 2, or 3", file=sys.stderr)
                 return 2
-            if stage == 1 and not args.profile:
-                print("curl-cffi stage 1 requires --profile", file=sys.stderr)
+            if stage >= 1 and not args.profile:
+                print("curl-cffi stages 1 through 3 require --profile", file=sys.stderr)
                 return 2
             result = run_curl_cffi(args.session_id, args.origin, args.ca_file,
                                    args.timeout, args.profile, args.control_port, stage)
@@ -369,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
                                                    "go-tls-client"],
                             default="curl-cffi")
     run_client.add_argument("--profile")
-    run_client.add_argument("--stage", type=int, choices=[0, 1])
+    run_client.add_argument("--stage", type=int, choices=[0, 1, 2, 3])
     run_client.add_argument("--origin", default="https://localhost:8443")
     run_client.add_argument("--ca-file", type=Path, default=Path("local/tls/ca.pem"))
     run_client.add_argument("--control-port", type=int, default=8444)

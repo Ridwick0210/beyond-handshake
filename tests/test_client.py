@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from beyond_handshake.client import run_go_stdlib
+from beyond_handshake.client import (_ResourceParser, _cache_max_age, _discover_and_fetch_resources,
+                                     run_go_stdlib)
 
 
 class GoClientBridgeTests(unittest.TestCase):
@@ -64,6 +65,59 @@ class GoClientBridgeTests(unittest.TestCase):
         self.assertEqual(result.failure_category, "task_flow_failure")
         self.assertIn("start: refused", result.error or "")
         outcome.assert_not_called()
+
+
+class ResourceDiscoveryTests(unittest.TestCase):
+    def test_cache_policy_requires_public_freshness_and_respects_no_store(self):
+        self.assertEqual(_cache_max_age("public, max-age=3600"), 3600)
+        self.assertEqual(_cache_max_age("private, max-age=3600"), 0)
+        self.assertEqual(_cache_max_age("no-store, max-age=3600"), 0)
+
+    def test_html_parser_collects_only_expected_resource_attributes(self):
+        parser = _ResourceParser()
+        parser.feed('<link rel="stylesheet" href="assets/a.css">'
+                    '<script src="assets/app.js"></script>'
+                    '<img src="assets/img/item.svg"><a href="/outside">skip</a>')
+        self.assertEqual(parser.resources, ["assets/a.css", "assets/app.js",
+                                            "assets/img/item.svg"])
+
+    def test_stage3_discovery_is_session_scoped_and_caches_fresh_assets(self):
+        class Response:
+            status_code = 200
+            headers = {"Cache-Control": "public, max-age=3600"}
+
+            def __init__(self, url, body):
+                self.url = url
+                self.content = body
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **_kwargs):
+                self.calls.append(url)
+                body = (b"body{background:url('img/amber-mug.svg')}"
+                        if url.endswith("style.css") else b"asset")
+                return Response(url, body)
+
+        class Page:
+            url = "https://localhost:8443/s/" + "a" * 32 + "/start"
+            text = ('<link rel="stylesheet" href="assets/style.css">'
+                    '<script src="assets/app.js"></script>'
+                    '<img src="https://example.invalid/x">')
+
+        client = Client()
+        cache = {}
+        metrics = {"discovered": 0, "network_fetches": 0, "cache_hits": 0}
+        _discover_and_fetch_resources(client, Page(), "https://localhost:8443",
+                                      "a" * 32, 10**20, cache, metrics)
+        _discover_and_fetch_resources(client, Page(), "https://localhost:8443",
+                                      "a" * 32, 10**20, cache, metrics)
+
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(metrics["network_fetches"], 3)
+        self.assertEqual(metrics["cache_hits"], 3)
+        self.assertTrue(all("example.invalid" not in value for value in client.calls))
 
 
 if __name__ == "__main__":

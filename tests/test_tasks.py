@@ -5,10 +5,16 @@ import re
 import unittest
 from urllib.parse import urlencode
 
-from beyond_handshake.tasks import LARGE_ASSET, TaskOracle
+from beyond_handshake.tasks import LARGE_ASSET, TaskOracle, cache_control_for_route
 
 
 class TaskOracleTests(unittest.TestCase):
+    def test_only_static_assets_are_cacheable(self):
+        for route in ("asset_css", "asset_js", "asset_image"):
+            self.assertEqual(cache_control_for_route(route), "public, max-age=3600")
+        for route in ("start", "search_api", "detail", "save_api", "confirmation"):
+            self.assertEqual(cache_control_for_route(route), "no-store")
+
     def setUp(self) -> None:
         self.oracle = TaskOracle()
         self.session_id = "a" * 32

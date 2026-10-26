@@ -24,6 +24,15 @@ CATALOG = (
 )
 TERMS = ("amber", "cedar", "cloud", "dune", "fern", "granite", "harbor", "indigo")
 LARGE_ASSET = bytes((index * 31 + 17) % 256 for index in range(192 * 1024))
+
+
+def cache_control_for_route(route: str) -> str:
+    """Permit a narrow cache for immutable local assets; task state stays private."""
+    if route in {"asset_css", "asset_js", "asset_image"}:
+        return "public, max-age=3600"
+    return "no-store"
+
+
 HOME_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Beyond Handshake</title>
 <style>

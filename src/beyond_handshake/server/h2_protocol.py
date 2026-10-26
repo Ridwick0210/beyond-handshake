@@ -16,6 +16,7 @@ from h2.events import (ConnectionTerminated, DataReceived, RequestReceived,
 from h2.exceptions import H2Error
 
 from beyond_handshake.server.h2_observer import H2FrameObserver
+from beyond_handshake.tasks import cache_control_for_route
 
 LOGGER = logging.getLogger("beyond_handshake.server.h2")
 def serve_h2(handler: Any) -> None:
@@ -72,10 +73,10 @@ def serve_h2(handler: Any) -> None:
 
     def send_response(stream_id: int, status: int, body: bytes, content_type: str,
                       session_id: str | None = None, request_id: str | None = None,
-                      content_length: int | None = None) -> None:
+                      content_length: int | None = None, route: str = "") -> None:
         headers = [(b":status", str(status).encode()), (b"content-type", content_type.encode()),
                    (b"content-length", str(len(body) if content_length is None else content_length).encode()),
-                   (b"cache-control", b"no-store")]
+                   (b"cache-control", cache_control_for_route(route).encode())]
         emit("http.response_headers", {"status": status,
              "body_bytes": len(body) if content_length is None else content_length, "protocol": "h2"},
              stream_id=stream_id, session_id=session_id, request_id=request_id)
@@ -214,7 +215,7 @@ def serve_h2(handler: Any) -> None:
                 if method == "HEAD":
                     body = b""
                 send_response(event.stream_id, status, body, ctype, sid, request_id,
-                              content_length=representation_bytes)
+                              content_length=representation_bytes, route=route)
             elif isinstance(event, StreamReset):
                 pending.pop(event.stream_id, None)
                 response_meta.pop(event.stream_id, None)
