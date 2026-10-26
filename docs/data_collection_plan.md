@@ -1,6 +1,6 @@
 # Data collection and model plan
 
-**Updated:** 2026-10-26 (Asia/Kolkata)
+**Updated:** 2026-10-27 (Asia/Kolkata)
 
 ## Current automated development path
 
@@ -20,13 +20,13 @@ The completed run and model comparisons are in [development_v3_report.md](develo
 
 Use the master document's 2,400-attempt grid as a budgeting example, not a mandatory or statistically sufficient count. Set actual cell counts only after measuring variance, runtime, storage, and the number of independent browser/client families. Keep browserless families disjoint across partitions. Preserve all attempted sessions in the ledger and report task success and packet coverage by cohort. Train preprocessing on the training partition, choose the operating threshold on validation, then apply the frozen bundle once to the test panel.
 
-The next practical implementation milestone is the matching Chrome runner and a second strong impersonator. Repeating the existing Firefox-versus-curl loopback task would add rows but little information about generalization.
+The Chrome runner is now implemented and a 20-session local Chrome 156 versus Chrome 150-profile pilot was captured (`docs/chrome156_fidelity_pilot.md`). This establishes that real Chrome can be measured with verified local CA trust; it does not satisfy matching-version parity. The next practical milestone is an exact Chrome 150 build or a supported profile for the installed Chrome version, followed by a predeclared matching-version fidelity run and a second independent strong impersonator. Repeating the existing loopback task would add rows but little information about generalization.
 
 ## Stage 0 and stage 1 implementation
 
 `configs/stages_0_1_development.json` is a 60-session development schedule: 20 Firefox references, 20 curl_cffi sessions (10 per stage, train), and 20 Go-family sessions (10 per stage, validation). Stage 0 uses ordinary client defaults. Stage 1 selects `chrome150` for curl_cffi and `chrome_150` for Go `tls-client`, disables HTTP/3 in the Go runner, and supplies the declared Chrome-like request-header template. Both conditions in each family/repetition share the same deterministic task seed and pair ID. The stage remains label metadata and is not added to model features.
 
-This schedule is a wiring and pilot plan, not a final evaluation design. The Go comparison also changes the HTTP/TLS client implementation between stages (`net/http` to `tls-client`); do not attribute a measured difference to the browser profile alone. Chrome is not installed in the current environment, so neither Chrome profile can yet be declared matched to an actual browser. Stage 0 and stage 1 collection should wait until these conditions and the fidelity limitation are accepted in the experiment protocol.
+This schedule is a wiring and pilot plan, not a final evaluation design. The Go comparison also changes the HTTP/TLS client implementation between stages (`net/http` to `tls-client`); do not attribute a measured difference to the browser profile alone. Chrome 156 is installed and has been captured, but neither Chrome 150 profile can be declared matched to that newer browser. A matching-version comparison remains required.
 
 ## Stage 2 and stage 3 pilot schedule
 
