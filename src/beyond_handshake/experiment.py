@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import resource
 import threading
 import time
@@ -16,7 +17,7 @@ from pathlib import Path
 from beyond_handshake.capture import (capture_loopback, features_from_server_events,
                                       join_and_aggregate, parse_capture_health,
                                       tshark_extract)
-from beyond_handshake.client import (run_curl_cffi, run_firefox, run_go_stdlib,
+from beyond_handshake.client import (run_chrome, run_curl_cffi, run_firefox, run_go_stdlib,
                                      run_go_tls_client, run_stdlib, write_attempt)
 from beyond_handshake.config import load_server_config
 from beyond_handshake.dataset import build_dataset
@@ -35,11 +36,15 @@ def plan_experiment(config_path: Path, output_path: Path) -> dict:
         raise ValueError("at least one client must be configured")
     episodes = []
     for client in clients:
-        if client.get("adapter") not in {"firefox", "stdlib", "curl-cffi", "go-stdlib",
+        if client.get("adapter") not in {"chrome", "firefox", "stdlib", "curl-cffi", "go-stdlib",
                                           "go-tls-client"}:
             raise ValueError(f"unsupported adapter in plan: {client.get('adapter')}")
         if client.get("execution_stack") not in {"browser", "browserless"}:
             raise ValueError("client execution_stack must be browser or browserless")
+        if client.get("adapter") in {"chrome", "firefox"} and (
+                client.get("execution_stack") != "browser" or client.get("imitation_stage") is not None
+                or client.get("profile") is not None):
+            raise ValueError("real-browser adapters require browser stack and no imitation stage/profile")
         if not client.get("client_family") or not client.get("partitions"):
             raise ValueError("each client needs client_family and partitions")
         stage = client.get("imitation_stage")
@@ -112,7 +117,7 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
         raise ValueError("unsupported experiment plan")
     config = plan["config"]
     server_config = load_server_config(server_config_path)
-    event_file = _active_event_file(server_config.logging.output_dir)
+    event_file = _active_event_file(server_config.logging.output_dir, server_config.control_port)
     origin = config.get("origin", f"https://localhost:{server_config.listen_port}")
     ca_file = Path(config.get("ca_file", server_config.tls.cert.parent / "ca.pem"))
     timeout = float(config.get("task_deadline_seconds", 45))
@@ -170,6 +175,9 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
             if adapter == "firefox":
                 attempt = run_firefox(episode["session_id"], origin, ca_file, timeout,
                                       server_config.control_port)
+            elif adapter == "chrome":
+                attempt = run_chrome(episode["session_id"], origin, ca_file, timeout,
+                                     server_config.control_port)
             elif adapter == "stdlib":
                 attempt = run_stdlib(episode["session_id"], origin, ca_file, timeout,
                                      server_config.control_port)
@@ -379,24 +387,20 @@ def _register_task(control_port: int, session_id: str, seed: int) -> dict:
         return json.load(response)
 
 
-def _active_event_file(output_dir: Path) -> Path:
-    manifests = list(output_dir.glob("*/manifest.json"))
-    active = []
-    for path in manifests:
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if value.get("status") == "partial":
-            active.append(path.parent / "events.jsonl")
-    if not active:
-        raise RuntimeError("no active server event run found")
-    if len(active) == 1:
-        return active[0]
-    # A crashed server leaves a partial manifest behind. The current server is the
-    # latest-started partial run; only that process can own the configured port.
-    return max(active, key=lambda path: json.loads((path.parent / "manifest.json").read_text(
-        encoding="utf-8")).get("started_wall_ns", 0))
+def _active_event_file(output_dir: Path, control_port: int) -> Path:
+    """Bind a collection to the live server's run, not a stale partial manifest."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{control_port}/run", timeout=5) as response:
+        run_id = json.load(response).get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(r"\d{8}T\d{6}Z-[a-f0-9]{8}", run_id):
+        raise ValueError("control plane returned an invalid server run ID")
+    manifest_path = output_dir / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("run_id") != run_id or manifest.get("status") != "partial":
+        raise RuntimeError("live server run manifest is missing or not active")
+    event_file = manifest_path.parent / "events.jsonl"
+    if not event_file.is_file():
+        raise FileNotFoundError(f"live server event file is missing: {event_file}")
+    return event_file
 
 
 def _rss_bytes() -> int | None:

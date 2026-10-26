@@ -1,15 +1,32 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from beyond_handshake.experiment import (_combine_feature_sources,
+from beyond_handshake.experiment import (_active_event_file, _combine_feature_sources,
                                          plan_experiment, rebuild_capture_dataset)
 
 
 class ExperimentPlanningTests(unittest.TestCase):
+    def test_collection_uses_live_run_id_even_if_stale_manifest_has_later_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live_id = "20261026T193857Z-2814d166"
+            stale_id = "20261026T195431Z-04c8e350"
+            for run_id in (live_id, stale_id):
+                run = root / run_id
+                run.mkdir()
+                (run / "manifest.json").write_text(json.dumps({"run_id": run_id,
+                                                                  "status": "partial"}))
+                (run / "events.jsonl").touch()
+            with patch("beyond_handshake.experiment.urllib.request.urlopen",
+                       return_value=io.BytesIO(json.dumps({"run_id": live_id}).encode())):
+                self.assertEqual(_active_event_file(root, 8444), root / live_id / "events.jsonl")
+
     def test_rebuild_refuses_unfinished_collection(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -106,21 +123,32 @@ class ExperimentPlanningTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stage 0"):
                 plan_experiment(config, root / "plan.json")
 
-    def test_stage_2_3_plan_keeps_curl_family_in_one_partition_and_pairs_seeds(self):
+    def test_stage_2_3_plan_keeps_browserless_families_partitioned_and_pairs_seeds(self):
         config = Path(__file__).resolve().parents[1] / "configs/stages_2_3_development.json"
         with tempfile.TemporaryDirectory() as tmp:
             plan = plan_experiment(config, Path(tmp) / "plan.json")
 
         episodes = plan["episodes"]
-        self.assertEqual(len(episodes), 50)
-        curl_rows = [row for row in episodes if row["client_family"] == "curl-impersonate"]
-        self.assertEqual({row["imitation_stage"] for row in curl_rows}, {2, 3})
-        self.assertEqual({row["partition"] for row in curl_rows}, {"train"})
-        for repeat in range(10):
-            pair = [row for row in curl_rows if row["repeat"] == repeat]
-            self.assertEqual(len(pair), 2)
-            self.assertEqual({row["task_seed"] for row in pair}, {pair[0]["task_seed"]})
-            self.assertEqual({row["pair_id"] for row in pair}, {pair[0]["pair_id"]})
+        self.assertEqual(len(episodes), 60)
+        for family, partition in (("curl-impersonate", "train"),
+                                  ("go-client-family", "validation")):
+            rows = [row for row in episodes if row["client_family"] == family]
+            self.assertEqual({row["imitation_stage"] for row in rows}, {2, 3})
+            self.assertEqual({row["partition"] for row in rows}, {partition})
+            for repeat in range(10):
+                pair = [row for row in rows if row["repeat"] == repeat]
+                self.assertEqual(len(pair), 2)
+                self.assertEqual({row["task_seed"] for row in pair}, {pair[0]["task_seed"]})
+                self.assertEqual({row["pair_id"] for row in pair}, {pair[0]["pair_id"]})
+
+    def test_chrome_reference_plan_keeps_real_browser_label(self):
+        config = Path(__file__).resolve().parents[1] / "configs/chrome156_profile150_fidelity_pilot.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = plan_experiment(config, Path(tmp) / "plan.json")
+        self.assertEqual(len(plan["episodes"]), 20)
+        chrome = [row for row in plan["episodes"] if row["adapter"] == "chrome"]
+        self.assertEqual(len(chrome), 10)
+        self.assertTrue(all(row["execution_stack"] == "browser" for row in chrome))
 
 
 if __name__ == "__main__":

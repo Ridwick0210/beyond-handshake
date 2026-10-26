@@ -15,7 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 from beyond_handshake.capture import discover_capture_tools
-from beyond_handshake.client import available_impersonation_profiles
+from beyond_handshake.client import available_impersonation_profiles, chrome_prerequisites
 from beyond_handshake.config import load_server_config
 from beyond_handshake.experiment import collect_plan, plan_experiment
 from beyond_handshake.modeling import train_baselines
@@ -49,6 +49,8 @@ def _preflight(config_path: Path, output_root: Path, model_root: Path,
     adapters = {client.get("adapter") for client in config.get("clients", [])}
     if "firefox" in adapters and not shutil.which("firefox"):
         raise RuntimeError("Firefox is unavailable")
+    if "chrome" in adapters:
+        chrome_prerequisites()
     if "go-stdlib" in adapters and not (_project_root() / "local/bin/bh-go-client").is_file():
         raise RuntimeError("Go adapter is not built; run `make go-client`")
     if "go-tls-client" in adapters and not (_project_root() / "local/bin/bh-go-tls-client").is_file():

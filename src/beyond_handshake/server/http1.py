@@ -367,7 +367,7 @@ def serve(config: ServerConfig, config_sha256: str, source_commit: str | None = 
     control_thread: Thread | None = None
     try:
         server = LocalHTTPServer((config.listen_host, config.listen_port), config, context, events, tasks)
-        control = ControlServer(("127.0.0.1", config.control_port), tasks)
+        control = ControlServer(("127.0.0.1", config.control_port), tasks, events.run_id)
         assert server is not None
         control_thread = Thread(target=control.serve_forever, name="bh-control-plane", daemon=True)
         control_thread.start()

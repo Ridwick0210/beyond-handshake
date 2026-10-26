@@ -13,8 +13,9 @@ class ControlServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], oracle: TaskOracle):
+    def __init__(self, address: tuple[str, int], oracle: TaskOracle, run_id: str):
         self.oracle = oracle
+        self.run_id = run_id
         super().__init__(address, ControlHandler)
 
 
@@ -58,6 +59,9 @@ class ControlHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self._local_only():
             self._reply(403, {"error": "control plane is loopback-only"})
+            return
+        if self.path == "/run":
+            self._reply(200, {"run_id": self.server.run_id})
             return
         parts = self.path.strip("/").split("/")
         if len(parts) != 3 or parts[0] != "sessions" or parts[2] != "outcome":

@@ -9,6 +9,7 @@ import hashlib
 import re
 import platform
 import shutil
+import signal
 import ssl
 import subprocess
 import tempfile
@@ -505,6 +506,102 @@ def run_firefox(session_id: str, origin: str, ca_file: Path, timeout_seconds: fl
                           "profile_isolation": "temporary; removed on exit",
                           "lab_ca_trust": "temporary install-tree enterprise policy"})
     return attempt
+
+
+def chrome_prerequisites() -> tuple[Path, Path, Path]:
+    """Resolve the installed Chrome, NSS utility, and mount-isolation helper."""
+    browser = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+    nss_utility = os.environ.get("BH_CERTUTIL") or shutil.which("certutil")
+    mount_helper = shutil.which("bwrap")
+    if not browser:
+        raise RuntimeError("Google Chrome is not installed")
+    if not nss_utility or not Path(nss_utility).is_file():
+        raise RuntimeError("NSS certutil is unavailable; install nss-tools or set BH_CERTUTIL")
+    if not mount_helper:
+        raise RuntimeError("bubblewrap is unavailable; install bwrap for isolated Chrome CA trust")
+    return Path(browser).resolve(), Path(nss_utility).resolve(), Path(mount_helper).resolve()
+
+
+def run_chrome(session_id: str, origin: str, ca_file: Path, timeout_seconds: float,
+               control_port: int | None = None) -> ExecutionResult:
+    """Run installed Chrome with a temporary profile and verified local CA trust."""
+    _validate_local_origin(origin, ca_file)
+    browser, certutil, bwrap = chrome_prerequisites()
+    version = subprocess.run([str(browser), "--version"], capture_output=True, text=True, timeout=10)
+    if version.returncode or not version.stdout.strip().startswith("Google Chrome "):
+        raise RuntimeError(f"could not query Google Chrome version: {version.stderr[-500:]}")
+    started = time.time_ns()
+    attempt = ExecutionResult(uuid.uuid4().hex, session_id, "google-chrome-headless",
+                              version.stdout.strip(), "google-chrome", "Google Chrome / Blink / BoringSSL",
+                              None, version.stdout.strip(), "script", started, started, False)
+    flags = ("--headless=new", "--no-first-run", "--no-default-browser-check",
+             "--disable-background-networking")
+    try:
+        with tempfile.TemporaryDirectory(prefix="bh-chrome-profile-") as directory:
+            root = Path(directory)
+            profile, config, cache, data = (root / name for name in ("profile", "config", "cache", "data"))
+            for path in (profile, config, cache, data):
+                path.mkdir()
+            legacy_nss = Path.home() / ".pki" / "nssdb"
+            nssdb = root / "nssdb" if legacy_nss.is_dir() else data / "pki" / "nssdb"
+            nssdb.mkdir(parents=True)
+            database = f"sql:{nssdb}"
+            for command in ([str(certutil), "-N", "-d", database, "--empty-password"],
+                            [str(certutil), "-A", "-d", database, "-t", "C,,",
+                             "-n", "BeyondHandshake-Local-CA", "-i", str(ca_file.resolve())]):
+                subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
+            launch = [str(bwrap), "--ro-bind", "/", "/", "--bind", "/tmp", "/tmp",
+                      "--dev-bind", "/dev", "/dev", "--proc", "/proc"]
+            if legacy_nss.is_dir():
+                launch.extend(("--bind", str(nssdb), str(legacy_nss)))
+            launch.extend(("--setenv", "XDG_CONFIG_HOME", str(config),
+                           "--setenv", "XDG_CACHE_HOME", str(cache),
+                           "--setenv", "XDG_DATA_HOME", str(data),
+                           "--", str(browser), *flags, f"--user-data-dir={profile}",
+                           origin.rstrip("/") + f"/s/{session_id}/start#autotask"))
+            with (root / "chrome.stderr.log").open("w+", encoding="utf-8") as errors:
+                process = subprocess.Popen(launch, stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=errors,
+                                           start_new_session=True)
+                try:
+                    port = int(urllib.parse.urlsplit(origin).port or 443)
+                    deadline = time.monotonic() + timeout_seconds
+                    while time.monotonic() < deadline:
+                        if process.poll() is not None:
+                            errors.flush()
+                            errors.seek(0)
+                            raise RuntimeError(f"Chrome exited early ({process.returncode}): {errors.read()[-1000:]}")
+                        outcome = read_task_outcome(session_id, control_port or port + 1)
+                        if outcome.get("task_success"):
+                            attempt.task_success = True
+                            attempt.observed_protocol = "see server connection events"
+                            attempt.steps.append({"route": "oracle", "state": outcome.get("state")})
+                            break
+                        time.sleep(0.25)
+                    else:
+                        raise TimeoutError("Chrome task timed out before oracle completion")
+                finally:
+                    _stop_chrome_process_group(process)
+    except Exception as exc:
+        attempt.failure_category = _failure_category(exc)
+        attempt.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        attempt.end_wall_ns = time.time_ns()
+    attempt.steps.append({"chrome_binary_sha256": _file_sha256(browser),
+                          "launch_flags": list(flags),
+                          "profile_isolation": "temporary; removed on exit",
+                          "lab_ca_trust": "temporary NSS database via bubblewrap mount"})
+    return attempt
+
+
+def _stop_chrome_process_group(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=3)
 
 
 def _firefox_install_root(launcher: str) -> Path:

@@ -246,13 +246,13 @@ def _model(args: argparse.Namespace) -> int:
 def _fidelity(args: argparse.Namespace) -> int:
     from beyond_handshake.fidelity import fidelity_report
 
-    result = fidelity_report(args.features, args.labels, args.output)
+    result = fidelity_report(args.features, args.labels, args.output, args.attempts)
     print(json.dumps(result, indent=2))
     return 0
 
 
 def _client(args: argparse.Namespace) -> int:
-    from beyond_handshake.client import (available_impersonation_profiles, run_curl_cffi,
+    from beyond_handshake.client import (available_impersonation_profiles, run_chrome, run_curl_cffi,
                                          run_firefox, run_go_stdlib, run_go_tls_client,
                                          run_stdlib, write_attempt)
 
@@ -282,6 +282,9 @@ def _client(args: argparse.Namespace) -> int:
         elif args.adapter == "firefox":
             result = run_firefox(args.session_id, args.origin, args.ca_file,
                                  args.timeout, args.control_port)
+        elif args.adapter == "chrome":
+            result = run_chrome(args.session_id, args.origin, args.ca_file,
+                                args.timeout, args.control_port)
         elif args.adapter == "go-stdlib":
             result = run_go_stdlib(args.session_id, args.origin, args.ca_file,
                                    args.timeout, args.control_port)
@@ -366,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--ca-file", type=Path, default=Path("local/tls/ca.pem"))
     run_client = client_commands.add_parser("run", help="run a task through a declared trusted adapter")
     run_client.add_argument("session_id")
-    run_client.add_argument("--adapter", choices=["stdlib", "curl-cffi", "firefox", "go-stdlib",
+    run_client.add_argument("--adapter", choices=["stdlib", "curl-cffi", "firefox", "chrome", "go-stdlib",
                                                    "go-tls-client"],
                             default="curl-cffi")
     run_client.add_argument("--profile")
@@ -416,6 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
     fidelity.add_argument("--features", type=Path, required=True)
     fidelity.add_argument("--labels", type=Path, required=True)
     fidelity.add_argument("--output", type=Path, required=True)
+    fidelity.add_argument("--attempts", type=Path,
+                          help="optional episode attempts JSONL for actual Chrome version and binary hash")
     return parser
 
 
