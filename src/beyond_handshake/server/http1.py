@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import ssl
+import stat
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -336,8 +339,20 @@ def make_ssl_context(config: ServerConfig) -> ssl.SSLContext:
     context.load_cert_chain(str(config.tls.cert), str(config.tls.key))
     if config.tls.keylog_path:
         config.tls.keylog_path.parent.mkdir(parents=True, exist_ok=True)
+        _secure_keylog_file(config.tls.keylog_path)
         context.keylog_filename = str(config.tls.keylog_path)
     return context
+
+
+def _secure_keylog_file(path: Path) -> None:
+    """Create optional lab TLS secrets with private permissions and no symlink target."""
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(handle).st_mode):
+            raise ValueError("TLS key log path must be a regular file")
+        os.fchmod(handle, 0o600)
+    finally:
+        os.close(handle)
 
 
 def serve(config: ServerConfig, config_sha256: str, source_commit: str | None = None,

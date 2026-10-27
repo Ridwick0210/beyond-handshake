@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "experiment_id": "local-h2-decrypt-audit-pilot-v1",
+  "seed": 20261029,
+  "task_id": "catalog-search-detail-save-v1",
+  "origin": "https://localhost:8443",
+  "ca_file": "local/tls/ca.pem",
+  "task_deadline_seconds": 45,
+  "capture_seconds": 5,
+  "repeats_per_client_partition": 1,
+  "clients": [
+    {"name": "chrome150", "adapter": "chrome", "client_family": "google-chrome",
+     "execution_stack": "browser", "controller": "script", "partitions": ["train", "validation"]},
+    {"name": "curl150", "adapter": "curl-cffi", "client_family": "curl-impersonate",
+     "execution_stack": "browserless", "controller": "script", "profile": "chrome150",
+     "imitation_stage": 1, "partitions": ["train"]},
+    {"name": "go150", "adapter": "go-tls-client", "client_family": "go-client-family",
+     "execution_stack": "browserless", "controller": "script", "profile": "chrome_150",
+     "imitation_stage": 1, "partitions": ["validation"]}
+  ],
+  "reserved_test": {"status": "reserved-not-collected",
+                    "client_family": "independent-strong-impersonator-required",
+                    "execution_stack": "browserless", "browser_negatives_required": true}
+}
