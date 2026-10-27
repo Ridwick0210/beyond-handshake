@@ -178,7 +178,11 @@ func execute(out *result, origin, caFile, session, profile string, stage int, ti
 		if len(item) != 2 || len(nonce) != 2 {
 			return errors.New("detail page has no save fields")
 		}
-		form := url.Values{"item_id": {string(item[1])}, "nonce": {string(nonce[1])}}.Encode()
+		formValues := url.Values{"item_id": {string(item[1])}, "nonce": {string(nonce[1])}}
+		if answer := termPattern.FindSubmatch(detail.Body); len(answer) == 2 {
+			formValues.Set("answer", string(answer[1]))
+		}
+		form := formValues.Encode()
 		save, err := request(ctx, client, http.MethodPost, baseURL+path+"/api/save", form, "form")
 		if err != nil {
 			return fmt.Errorf("save: %w", err)

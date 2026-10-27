@@ -71,6 +71,8 @@ def main() -> int:
             request["timeout"], request["control_port"])
     meter = _ProcessTreeMeter()
     meter.start()
+    result = None
+    error = None
     try:
         if adapter == "chrome":
             result = run_chrome(*args)
@@ -88,8 +90,14 @@ def main() -> int:
                                    request.get("imitation_stage", 1))
         else:
             raise ValueError(f"unsupported adapter {adapter!r}")
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
     finally:
         resource_metrics = meter.finish()
+    if result is None:
+        print(json.dumps({"error": error or "client adapter returned no result",
+                          "resource_metrics": resource_metrics}))
+        return 0
     result.resource_metrics = {**result.resource_metrics, **resource_metrics}
     print(json.dumps({"result": {field: getattr(result, field)
                                  for field in result.__dataclass_fields__}}))

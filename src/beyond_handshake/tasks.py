@@ -23,6 +23,20 @@ CATALOG = (
     ("indigo-pen", "Indigo Fountain Pen", "office"),
 )
 TERMS = ("amber", "cedar", "cloud", "dune", "fern", "granite", "harbor", "indigo")
+DOCS = (
+    ("accessibility", "Keyboard Navigation", "keyboard", "Tab", "Use Tab to move focus forward."),
+    ("backups", "Backup Schedule", "backup", "daily", "The workspace is backed up daily."),
+    ("retention", "Data Retention", "retention", "30 days",
+     "Deleted drafts are retained for 30 days."),
+    ("exports", "Export Formats", "export", "CSV", "Table exports are available as CSV files."),
+    ("timezone", "Timezone Settings", "timezone", "UTC", "Audit timestamps are stored in UTC."),
+    ("passwords", "Password Policy", "password", "12 characters",
+     "Passwords must contain at least 12 characters."),
+    ("sessions", "Session Expiry", "session", "8 hours",
+     "An inactive browser session expires after 8 hours."),
+    ("support", "Support Hours", "support", "09:00–17:00",
+     "Support is available 09:00–17:00 local time."),
+)
 LARGE_ASSET = bytes((index * 31 + 17) % 256 for index in range(192 * 1024))
 
 
@@ -60,6 +74,8 @@ class Session:
     term: str
     item_id: str
     nonce: str
+    task_id: str
+    expected_answer: str
     state: str = "registered"
 
 
@@ -70,18 +86,24 @@ class TaskOracle:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
 
-    def register(self, session_id: str, seed: int) -> dict:
+    def register(self, session_id: str, seed: int,
+                 task_id: str = "catalog-search-detail-save-v1") -> dict:
         if not re.fullmatch(r"[a-f0-9]{32}", session_id):
             raise ValueError("session_id must be 32 lowercase hexadecimal characters")
         if not 0 <= seed <= 2**31 - 1:
             raise ValueError("seed must be between 0 and 2147483647")
+        if task_id not in {"catalog-search-detail-save-v1", "docs-search-answer-v1"}:
+            raise ValueError("unsupported task_id")
         rng = random.Random(seed)
-        term = rng.choice(TERMS)
-        item = next(item for item in CATALOG if item[0].startswith(term))
+        if task_id == "docs-search-answer-v1":
+            item_id, _title, term, answer, _body = rng.choice(DOCS)
+        else:
+            term = rng.choice(TERMS)
+            item_id, answer = next((item[0], "") for item in CATALOG if item[0].startswith(term))
         with self._lock:
             if session_id in self._sessions:
                 raise ValueError("session_id is already registered")
-            session = Session(seed, term, item[0], secrets.token_hex(16))
+            session = Session(seed, term, item_id, secrets.token_hex(16), task_id, answer)
             self._sessions[session_id] = session
         return {"session_id": session_id, "seed": seed, "task": self.task_spec(session_id)}
 
@@ -90,8 +112,12 @@ class TaskOracle:
             session = self._sessions.get(session_id)
             if session is None:
                 raise KeyError("unknown session")
-            return {"workload_id": "catalog-search-detail-save-v1",
-                    "instructions": f"Search for {session.term}; open the matching item and save it.",
+            if session.task_id == "docs-search-answer-v1":
+                instructions = (f"Find the documentation for {session.term}; submit the answer shown "
+                                "in its source.")
+            else:
+                instructions = f"Search for {session.term}; open the matching item and save it."
+            return {"workload_id": session.task_id, "instructions": instructions,
                     "start_url": f"/s/{session_id}/start"}
 
     def outcome(self, session_id: str) -> dict:
@@ -138,10 +164,14 @@ class TaskOracle:
         if method == "GET" and path == "/start":
             if s.state == "registered":
                 s.state = "started"
-            page = ("<!doctype html><html><head><meta charset=utf-8><title>Local Catalog</title>"
+            is_docs = s.task_id == "docs-search-answer-v1"
+            title = "Documentation search" if is_docs else "Local Catalog"
+            action = ("Find the matching guidance and submit its answer." if is_docs
+                      else "open the matching item, then save it.")
+            page = ("<!doctype html><html><head><meta charset=utf-8><title>" + title + "</title>"
                     "<link rel=stylesheet href=\"assets/style.css\"></head><body><main>"
-                    f"<h1>Local catalog</h1><p>Search for <b>{html.escape(s.term)}</b>, "
-                    "open the matching item, then save it.</p><form id=search action=\"/s/" + session_id +
+                    f"<h1>{title}</h1><p>Search for <b>{html.escape(s.term)}</b>, {action}</p>"
+                    "<form id=search action=\"/s/" + session_id +
                     "/api/search\"><input name=q><button>Search</button></form><div id=result></div>"
                     "<script src=\"assets/app.js\"></script></main></body></html>")
             return 200, page.encode(), "text/html; charset=utf-8", "start"
@@ -158,7 +188,8 @@ class TaskOracle:
                   "if(location.hash==='#autotask'){(async()=>{if(search){const q=document.querySelector('b')?.textContent||'';"
                   "const u=new URL(search.action,location.href);u.search=new URLSearchParams({q});const r=await fetch(u);"
                   "const j=await r.json();if(j.items?.length===1)location.href=j.items[0].url+'#autotask';}"
-                  "else if(save){const data=new URLSearchParams(new FormData(save));await fetch(save.action,{method:'POST',body:data,"
+                  "else if(save){const answer=save.querySelector('input[name=answer]');if(answer)answer.value=document.querySelector('b')?.textContent||'';"
+                  "const data=new URLSearchParams(new FormData(save));await fetch(save.action,{method:'POST',body:data,"
                   "headers:{'Content-Type':'application/x-www-form-urlencoded'}});"
                   "location.href=save.dataset.complete;}})().catch(console.error);}")
             return 200, js.encode(), "text/javascript", "asset_js"
@@ -186,7 +217,11 @@ class TaskOracle:
                 return 200, b'{"items":[]}\n', "application/json", "search_api"
             if s.state == "started":
                 s.state = "searched"
-            item = next(row for row in CATALOG if row[0] == s.item_id)
+            if s.task_id == "docs-search-answer-v1":
+                doc = next(row for row in DOCS if row[0] == s.item_id)
+                item = (doc[0], doc[1])
+            else:
+                item = next((row[0], row[1]) for row in CATALOG if row[0] == s.item_id)
             return 200, json.dumps({"items": [{"id": item[0], "name": item[1],
                                  "url": f"/s/{session_id}/item/{item[0]}"}]}).encode(), "application/json", "search_api"
         if method == "GET" and path.startswith("/item/"):
@@ -195,19 +230,35 @@ class TaskOracle:
                 return 409, b'{"error":"Item is not available in this task state"}\n', "application/json", "detail"
             if s.state == "searched":
                 s.state = "selected"
-            item = next(row for row in CATALOG if row[0] == item_id)
-            page = (f"<!doctype html><html><head><title>{html.escape(item[1])}</title>"
-                    "<script defer src=\"../assets/app.js\"></script></head><body>"
-                    f"<h1>{html.escape(item[1])}</h1><img alt=\"{html.escape(item[1])}\" src=\"../assets/img/{item_id}.svg\">"
-                    f"<form id=save data-complete=\"/s/{session_id}/complete\" "
-                    f"method=post action=\"/s/{session_id}/api/save\"><input type=hidden name=item_id value=\"{item_id}\">"
-                    f"<input type=hidden name=nonce value=\"{s.nonce}\"><button>Save</button></form></body></html>")
+            if s.task_id == "docs-search-answer-v1":
+                doc = next(row for row in DOCS if row[0] == item_id)
+                page = (f"<!doctype html><html><head><title>{html.escape(doc[1])}</title>"
+                        "<script defer src=\"../assets/app.js\"></script></head><body>"
+                        f"<h1>{html.escape(doc[1])}</h1><p>{html.escape(doc[4])}</p>"
+                        f"<p>Submit the documented value: <b>{html.escape(s.expected_answer)}</b></p>"
+                        f"<form id=save data-complete=\"/s/{session_id}/complete\" method=post "
+                        f"action=\"/s/{session_id}/api/save\"><input type=hidden name=item_id value=\"{item_id}\">"
+                        f"<input type=hidden name=nonce value=\"{s.nonce}\"><label>Answer "
+                        "<input name=answer value=\"\"></label>"
+                        "<button>Submit answer</button></form></body></html>")
+            else:
+                item = next(row for row in CATALOG if row[0] == item_id)
+                page = (f"<!doctype html><html><head><title>{html.escape(item[1])}</title>"
+                        "<script defer src=\"../assets/app.js\"></script></head><body>"
+                        f"<h1>{html.escape(item[1])}</h1><img alt=\"{html.escape(item[1])}\" src=\"../assets/img/{item_id}.svg\">"
+                        f"<form id=save data-complete=\"/s/{session_id}/complete\" "
+                        f"method=post action=\"/s/{session_id}/api/save\"><input type=hidden name=item_id value=\"{item_id}\">"
+                        f"<input type=hidden name=nonce value=\"{s.nonce}\"><button>Save</button></form></body></html>")
             return 200, page.encode(), "text/html; charset=utf-8", "detail"
         if method == "POST" and path == "/api/save":
             data = parse_qs(body.decode("utf-8", "replace"))
             if s.state in {"saved", "completed"}:
                 return 200, b'{"saved":true,"duplicate":true}\n', "application/json", "save_api"
-            if s.state != "selected" or data.get("item_id") != [s.item_id] or data.get("nonce") != [s.nonce]:
+            valid = (s.state == "selected" and data.get("item_id") == [s.item_id]
+                     and data.get("nonce") == [s.nonce])
+            if s.task_id == "docs-search-answer-v1":
+                valid = valid and data.get("answer") == [s.expected_answer]
+            if not valid:
                 return 409, b'{"error":"Save did not match the active task"}\n', "application/json", "save_api"
             s.state = "saved"
             return 200, b'{"saved":true,"duplicate":false}\n', "application/json", "save_api"

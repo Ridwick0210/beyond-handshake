@@ -154,7 +154,8 @@ def _task(args: argparse.Namespace) -> int:
     session_id = args.session_id or uuid.uuid4().hex
     if args.task_command == "register":
         seed = args.seed if args.seed is not None else secrets.randbelow(2**31)
-        payload = json.dumps({"session_id": session_id, "seed": seed}).encode()
+        payload = json.dumps({"session_id": session_id, "seed": seed,
+                              "task_id": args.task_id}).encode()
         request = urllib.request.Request(
             f"http://127.0.0.1:{args.control_port}/sessions", data=payload,
             headers={"Content-Type": "application/json"}, method="POST",
@@ -337,6 +338,8 @@ def build_parser() -> argparse.ArgumentParser:
     register = task_commands.add_parser("register", help="register a local catalog task")
     register.add_argument("--session-id")
     register.add_argument("--seed", type=int)
+    register.add_argument("--task-id", choices=("catalog-search-detail-save-v1", "docs-search-answer-v1"),
+                          default="catalog-search-detail-save-v1")
     register.add_argument("--control-port", type=int, default=8444)
     outcome = task_commands.add_parser("outcome", help="read a registered task outcome")
     outcome.add_argument("session_id")

@@ -140,7 +140,8 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
                 stream.write(json.dumps(row, sort_keys=True) + "\n")
 
         record("planned")
-        task = _register_task(server_config.control_port, episode["session_id"], episode["task_seed"])
+        task = _register_task(server_config.control_port, episode["session_id"], episode["task_seed"],
+                              episode["task_id"])
         record("prepared", workload_id=task.get("task", {}).get("workload_id"))
         capture_result: dict = {}
         capture_error: list[str] = []
@@ -352,9 +353,9 @@ def _combine_feature_sources(joined_rows: list[dict], event_rows: list[dict],
     return combined
 
 
-def _register_task(control_port: int, session_id: str, seed: int) -> dict:
+def _register_task(control_port: int, session_id: str, seed: int, task_id: str) -> dict:
     request = urllib.request.Request(f"http://127.0.0.1:{control_port}/sessions",
-        data=json.dumps({"session_id": session_id, "seed": seed}).encode(),
+        data=json.dumps({"session_id": session_id, "seed": seed, "task_id": task_id}).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.load(response)
@@ -392,11 +393,21 @@ def _run_measured_client(episode: dict, origin: str, ca_file: Path, timeout: flo
         raise RuntimeError(f"client worker exited {worker.returncode}: {worker.stderr[-1000:]}")
     try:
         payload = json.loads(worker.stdout)
-        attempt = ExecutionResult(**payload["result"])
+        if "result" in payload:
+            attempt = ExecutionResult(**payload["result"])
+            resource_metrics = attempt.resource_metrics
+        else:
+            now = time.time_ns()
+            attempt = ExecutionResult(uuid.uuid4().hex, episode["session_id"], episode["adapter"],
+                "unknown", episode["client_family"], "unresolved", episode.get("profile"), None,
+                episode["controller"], now, now, False, failure_category="setup_failure",
+                error=payload.get("error", "client adapter failed"))
+            attempt.imitation_stage = episode.get("imitation_stage")
+            resource_metrics = payload.get("resource_metrics", {})
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise RuntimeError(f"client worker returned invalid result: {worker.stderr[-1000:]}") from exc
     return attempt, {"status": "measured", "worker_wall_ns": worker_wall_ns,
-                     **attempt.resource_metrics}
+                     **resource_metrics}
 
 
 def _sha256(path: Path) -> str:

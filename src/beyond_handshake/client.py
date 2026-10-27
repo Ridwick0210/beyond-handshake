@@ -257,8 +257,11 @@ def run_curl_cffi(session_id: str, origin: str, ca_file: Path,
                     raise ValueError("detail page did not contain the task's save fields")
                 attempt.steps.append({"route": "detail", "status": response.status_code,
                                       "visit": visit})
+                form = {"item_id": item_id, "nonce": nonce}
+                if parser.bold_text:
+                    form["answer"] = " ".join(parser.bold_text)
                 response = client.post(base + f"/s/{session_id}/api/save",
-                                       data={"item_id": item_id, "nonce": nonce},
+                                       data=form,
                                        timeout=_remaining(mono_deadline), allow_redirects=False)
                 _require_ok(response.status_code)
                 attempt.steps.append({"route": "save_api", "status": response.status_code,
@@ -323,7 +326,10 @@ def run_stdlib(session_id: str, origin: str, ca_file: Path, timeout_seconds: flo
             raise ValueError("detail page did not contain the task's save fields")
         attempt.steps.append({"route": "detail", "status": response.status})
         save_path = f"/s/{session_id}/api/save"
-        save_body = urllib.parse.urlencode({"item_id": item_id, "nonce": nonce}).encode()
+        form = {"item_id": item_id, "nonce": nonce}
+        if parser.bold_text:
+            form["answer"] = " ".join(parser.bold_text)
+        save_body = urllib.parse.urlencode(form).encode()
         response = _stdlib_request(connection, "POST", save_path, deadline, save_body,
                                    {"Content-Type": "application/x-www-form-urlencoded"})
         if response.status != 200:

@@ -44,7 +44,8 @@ def _preflight(config_path: Path, output_root: Path, model_root: Path,
         raise FileNotFoundError(f"local CA is missing: {ca_file}")
     if config.get("origin") != f"https://localhost:{server_config.listen_port}":
         raise ValueError("development origin must match the local HTTPS server")
-    if config.get("task_id") != "catalog-search-detail-save-v1":
+    if config.get("task_id", "catalog-search-detail-save-v1") not in {
+            "catalog-search-detail-save-v1", "docs-search-answer-v1"}:
         raise ValueError("unsupported development task_id")
     adapters = {client.get("adapter") for client in config.get("clients", [])}
     if "firefox" in adapters and not shutil.which("firefox"):

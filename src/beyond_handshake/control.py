@@ -50,7 +50,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             return
         try:
             data = json.loads(self.rfile.read(int(length_raw)))
-            result = self.server.oracle.register(data["session_id"], data["seed"])
+            result = self.server.oracle.register(data["session_id"], data["seed"],
+                                                 data.get("task_id", "catalog-search-detail-save-v1"))
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             self._reply(400, {"error": str(exc)})
             return

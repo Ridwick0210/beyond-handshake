@@ -9,7 +9,14 @@ This page distinguishes working prototype components from complete requirements 
 - Replaced the previous collector-process CPU delta and process-lifetime RSS high-water mark in `src/beyond_handshake/experiment.py`. Each adapter now runs in `src/beyond_handshake/client_worker.py`, isolated from the collector/server process, with Linux `/proc` sampling every 20 ms across the worker's descendant process tree.
 - Episode cost metadata now records adapter wall time, worker wall time, sampled process-tree CPU nanoseconds, and peak aggregate resident memory. The method string explicitly identifies Linux `/proc` sampling and worker isolation. The sampling interval can miss very short-lived processes; this is a development measurement method, not cgroup-grade accounting.
 - Checks run: `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m compileall -q src/beyond_handshake` completed successfully; `git diff --check` completed successfully. Ruff was unavailable in the active environment (`uv run ruff`: executable not found). No collection was run, so no resource-cost observations have yet been produced.
-- Remaining: a real collection is needed to validate measured output for each adapter. Controlled additional task and network-path conditions are not implemented here; the current workload is restricted by development preflight to the catalog task, and packet capture is hardcoded to loopback. A second path requires an explicitly configured controlled interface/network point; loopback delay must not be presented as a real path shift. No participant data were collected.
+- Remaining at this point: a real collection is needed to validate measured output for each adapter. Additional workload and network-path support are tracked below; the original collection path remains loopback-only, and a second path requires a controlled interface/network point. Loopback delay must not be presented as a real path shift. No participant data were collected.
+
+## Second workload implementation on 2026-10-27
+
+- Added `docs-search-answer-v1`, a deterministic synthetic documentation search and answer-submission workload. Registration, shared server oracle, browser auto-task page, Python direct adapters, Go direct adapters, experiment planning, and development preflight accept the task ID. The task ID remains metadata and is excluded from feature vectors.
+- Added `configs/docs_search_answer_development.json`, a 40-session plan with Firefox references in both train and validation, curl-cffi in train, and Go tls-client in validation. `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m beyond_handshake.cli experiment plan --config configs/docs_search_answer_development.json --output /tmp/docs-search-answer-plan.json` succeeded and generated the 40 planned episodes. This validates schedule construction only; no workload session or capture was run.
+- `gofmt` on both modified Go adapters and `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m compileall -q src/beyond_handshake` succeeded. `go build` could not complete: pinned Go modules were not cached, the elevated download attempt did not finish, and it was interrupted; no Go build result is claimed. No tests were added or run.
+- Added `docs/remaining_research_gates.md` with explicit acceptance checks and outside dependencies for the real path shift, independent third family, participant-level human FPR, and final freeze. This host's `ip`/`tc` netlink access returns `Operation not permitted`; no network shaping or participant collection was attempted. The suggested `wreq` candidate is not counted as an independent family because its upstream documents a BoringSSL-based HTTPS stack.
 
 ## Phase 0 — Scope and protocol
 
@@ -50,7 +57,7 @@ This page distinguishes working prototype components from complete requirements 
 - Added same-origin CSS/JavaScript/SVG routes and a deterministic 192 KiB asset; all URLs remain under the task origin.
 - Added a stateful success oracle with invalid transition rejection, duplicate-save handling, and a separate loopback control server on port 8444. Task routes are shared by HTTP/1.1 and h2.
 - Added task session registration and outcome commands. Session state is currently in memory and is lost when the server restarts.
-- Additional documentation-search and form workloads, external-URL boundary tests, and a persistent control-plane ledger remain outstanding.
+- At that implementation point, documentation-search and multi-step-form workloads, external-URL boundary tests, and a persistent control-plane ledger remained outstanding. The documentation-search workload was added in the 2026-10-27 entry below; a multi-step-form workload and the other listed items remain open.
 
 ## Phase 6 — Packet capture and TCP/TLS observations
 
