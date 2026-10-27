@@ -509,12 +509,13 @@ def run_firefox(session_id: str, origin: str, ca_file: Path, timeout_seconds: fl
 
 
 def chrome_prerequisites() -> tuple[Path, Path, Path]:
-    """Resolve the installed Chrome, NSS utility, and mount-isolation helper."""
-    browser = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+    """Resolve pinned/installed Chrome, NSS utility, and mount-isolation helper."""
+    browser = (os.environ.get("BH_CHROME_BIN") or shutil.which("google-chrome")
+               or shutil.which("google-chrome-stable"))
     nss_utility = os.environ.get("BH_CERTUTIL") or shutil.which("certutil")
     mount_helper = shutil.which("bwrap")
-    if not browser:
-        raise RuntimeError("Google Chrome is not installed")
+    if not browser or not Path(browser).is_file() or not os.access(browser, os.X_OK):
+        raise RuntimeError("Google Chrome executable is unavailable; set BH_CHROME_BIN to a pinned binary")
     if not nss_utility or not Path(nss_utility).is_file():
         raise RuntimeError("NSS certutil is unavailable; install nss-tools or set BH_CERTUTIL")
     if not mount_helper:
@@ -528,7 +529,8 @@ def run_chrome(session_id: str, origin: str, ca_file: Path, timeout_seconds: flo
     _validate_local_origin(origin, ca_file)
     browser, certutil, bwrap = chrome_prerequisites()
     version = subprocess.run([str(browser), "--version"], capture_output=True, text=True, timeout=10)
-    if version.returncode or not version.stdout.strip().startswith("Google Chrome "):
+    if version.returncode or not re.match(r"^Google Chrome(?: for Testing)? \d+\.",
+                                           version.stdout.strip()):
         raise RuntimeError(f"could not query Google Chrome version: {version.stderr[-500:]}")
     started = time.time_ns()
     attempt = ExecutionResult(uuid.uuid4().hex, session_id, "google-chrome-headless",

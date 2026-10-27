@@ -4,8 +4,26 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
+
+
+def _is_grease(value: str) -> bool:
+    """Recognize RFC 8701 GREASE code points in decimal or hexadecimal fields."""
+    try:
+        number = int(value, 16) if value.lower().startswith("0x") else int(value)
+    except ValueError:
+        return False
+    return 0 <= number <= 0xffff and number >> 8 == number & 0xff and number & 0x0f == 0x0a
+
+
+def _normalize_observation(dimension: str, observation: object) -> object:
+    if dimension in {"tls_cipher_suites_order", "tls_extension_types_order"} and isinstance(
+            observation, list):
+        return ["<GREASE>" if isinstance(item, str) and _is_grease(item) else item
+                for item in observation]
+    return observation
 
 
 def fidelity_report(features_path: Path, labels_path: Path, output_path: Path,
@@ -37,7 +55,8 @@ def fidelity_report(features_path: Path, labels_path: Path, output_path: Path,
                     observations = [observations]
                 for observation in observations:
                     by_client[client][dimension][json.dumps(
-                        observation, sort_keys=True, separators=(",", ":"))] += 1
+                        _normalize_observation(dimension, observation),
+                        sort_keys=True, separators=(",", ":"))] += 1
     chrome_versions: Counter = Counter()
     chrome_hashes: Counter = Counter()
     if attempts_path is not None:
@@ -75,17 +94,19 @@ def fidelity_report(features_path: Path, labels_path: Path, output_path: Path,
                 status = "mismatched"
             details.append({"component": dimension, "status": status,
                             "actual_browser_values": dict(left), "impersonator_values": dict(right),
-                            "interpretation": "exploratory cross-client comparison; not a target-profile fidelity test"})
+                            "interpretation": "literal observation-set comparison; not proof of exact-build parity"})
         is_chrome_reference = actual == "google-chrome"
-        version_matches = bool(chrome_versions) and all(
-            value.startswith("Google Chrome 150.") for value in chrome_versions)
+        version_matches = bool(chrome_versions) and all(re.fullmatch(
+            r"Google Chrome(?: for Testing)? 150\.\d+\.\d+\.\d+", value)
+            for value in chrome_versions)
         if is_chrome_reference and not version_matches:
             overall_status = "version_mismatch" if chrome_versions else "not_comparable"
             reason = ("Installed Chrome version differs from the Chrome 150 profile target."
                       if chrome_versions else "Chrome executable version was not recorded in attempts.")
         else:
             overall_status = "approximate_not_verified"
-            reason = ("Component observations remain exploratory; full profile parity has not been audited."
+            reason = ("Chrome 150 milestone matches, but profiles do not pin this exact build; "
+                      "full protocol parity has not been audited."
                       if is_chrome_reference else
                       "No real Chrome 150 executable was available to compare against the impersonation profile.")
         comparisons.append({"actual_client_family": actual, "impersonator_family": profile,
@@ -93,6 +114,8 @@ def fidelity_report(features_path: Path, labels_path: Path, output_path: Path,
                             "actual_browser_versions": dict(chrome_versions) if is_chrome_reference else {},
                             "actual_browser_binary_hashes": dict(chrome_hashes) if is_chrome_reference else {},
                             "target_browser_available": is_chrome_reference and version_matches,
+                            "target_version_alignment": ("milestone_match_only" if version_matches else
+                                                         "version_mismatch") if is_chrome_reference else "not_applicable",
                             "overall_status": overall_status,
                             "components": details,
                             "reason": reason})
@@ -104,7 +127,7 @@ def fidelity_report(features_path: Path, labels_path: Path, output_path: Path,
               "not_observed": [dimension for dimension in packet_dimensions
                                if dimension not in observed_packet_dimensions] +
                               ["GREASE behavior", "wire-level H2 frame ordering before endpoint parsing"],
-              "interpretation": "Cross-family differences are exploratory. Chrome 150 target fidelity remains unverified without a matching real browser."}
+              "interpretation": "Cross-family differences are exploratory. Matching a Chrome 150 milestone does not establish exact-build or full protocol parity."}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report

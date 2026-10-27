@@ -83,6 +83,38 @@ class FidelityTests(unittest.TestCase):
             self.assertEqual(alpn["status"], "matched")
             self.assertEqual(comparison["overall_status"], "version_mismatch")
 
+    def test_chrome_for_testing_milestone_and_grease_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            features = root / "features.csv"
+            with features.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["session_id", "tls_cipher_suites_order"])
+                writer.writeheader()
+                writer.writerow({"session_id": "chrome", "tls_cipher_suites_order":
+                                 '[["0x0a0a","0x1301","0x1302"]]'})
+                writer.writerow({"session_id": "curl", "tls_cipher_suites_order":
+                                 '[["0x4a4a","0x1301","0x1302"]]'})
+            labels = root / "labels.json"
+            labels.write_text(json.dumps([
+                {"session_id": "chrome", "client_family": "google-chrome"},
+                {"session_id": "curl", "client_family": "curl-impersonate"},
+            ]))
+            attempts = root / "episodes.jsonl"
+            attempts.write_text(json.dumps({"attempt": {
+                "client_family": "google-chrome",
+                "adapter_version": "Google Chrome for Testing 150.0.7871.124",
+            }}) + "\n")
+            report = fidelity_report(features, labels, root / "report.json", attempts)
+            comparison = next(row for row in report["comparisons"]
+                              if row["actual_client_family"] == "google-chrome"
+                              and row["impersonator_family"] == "curl-impersonate")
+            ciphers = next(row for row in comparison["components"]
+                           if row["component"] == "tls_cipher_suites_order")
+            self.assertEqual(ciphers["status"], "matched")
+            self.assertTrue(comparison["target_browser_available"])
+            self.assertEqual(comparison["target_version_alignment"], "milestone_match_only")
+            self.assertEqual(comparison["overall_status"], "approximate_not_verified")
+
 
 if __name__ == "__main__":
     unittest.main()

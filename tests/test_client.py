@@ -8,7 +8,21 @@ from pathlib import Path
 from unittest import mock
 
 from beyond_handshake.client import (_ResourceParser, _cache_max_age, _discover_and_fetch_resources,
-                                     run_go_stdlib)
+                                     chrome_prerequisites, run_go_stdlib)
+
+
+class ChromePrerequisiteTests(unittest.TestCase):
+    def test_explicit_pinned_binary_takes_priority_over_system_chrome(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            browser, certutil, bwrap = (root / name for name in ("chrome", "certutil", "bwrap"))
+            for path in (browser, certutil, bwrap):
+                path.write_text("fixture")
+                path.chmod(0o700)
+            with mock.patch.dict("os.environ", {"BH_CHROME_BIN": str(browser),
+                                             "BH_CERTUTIL": str(certutil)}), mock.patch(
+                    "beyond_handshake.client.shutil.which", return_value=str(bwrap)):
+                self.assertEqual(chrome_prerequisites(), (browser, certutil, bwrap))
 
 
 class GoClientBridgeTests(unittest.TestCase):
