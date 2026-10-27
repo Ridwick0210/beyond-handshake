@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import random
 import re
-import resource
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -17,8 +18,7 @@ from pathlib import Path
 from beyond_handshake.capture import (capture_loopback, features_from_server_events,
                                       join_and_aggregate, parse_capture_health,
                                       tshark_extract)
-from beyond_handshake.client import (run_chrome, run_curl_cffi, run_firefox, run_go_stdlib,
-                                     run_go_tls_client, run_stdlib, write_attempt)
+from beyond_handshake.client import ExecutionResult, write_attempt
 from beyond_handshake.config import load_server_config
 from beyond_handshake.dataset import build_dataset
 
@@ -167,43 +167,19 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
         record("capture_ready", status="capturing" if capture_ready_at is not None else "capture_unavailable",
                capture_duration_limit_seconds=capture_limit)
         record("running")
-        cpu_start = time.process_time_ns()
-        rss_before = _rss_bytes()
         started = time.time_ns()
         try:
-            adapter = episode["adapter"]
-            if adapter == "firefox":
-                attempt = run_firefox(episode["session_id"], origin, ca_file, timeout,
-                                      server_config.control_port)
-            elif adapter == "chrome":
-                attempt = run_chrome(episode["session_id"], origin, ca_file, timeout,
-                                     server_config.control_port)
-            elif adapter == "stdlib":
-                attempt = run_stdlib(episode["session_id"], origin, ca_file, timeout,
-                                     server_config.control_port)
-            elif adapter == "go-stdlib":
-                attempt = run_go_stdlib(episode["session_id"], origin, ca_file, timeout,
-                                        server_config.control_port)
-            elif adapter == "go-tls-client":
-                attempt = run_go_tls_client(episode["session_id"], origin, ca_file, timeout,
-                    episode["profile"], server_config.control_port,
-                    imitation_stage=episode.get("imitation_stage", 1))
-            else:
-                attempt = run_curl_cffi(episode["session_id"], origin, ca_file, timeout,
-                    episode.get("profile"), server_config.control_port,
-                    episode.get("imitation_stage", 1))
+            attempt, client_cost = _run_measured_client(episode, origin, ca_file, timeout,
+                                                       server_config.control_port)
         except Exception as exc:
             # A setup error remains a visible attempt and never vanishes from the schedule.
-            from beyond_handshake.client import ExecutionResult
-
             now = time.time_ns()
             attempt = ExecutionResult(episode["episode_id"], episode["session_id"], episode["adapter"],
                 "unknown", episode["client_family"], "unresolved", episode.get("profile"), None,
                 episode["controller"], started, now, False, failure_category="setup_failure",
                 error=f"{type(exc).__name__}: {exc}")
+            client_cost = {"status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
         attempt.imitation_stage = episode.get("imitation_stage")
-        cpu_ns = time.process_time_ns() - cpu_start
-        rss_after = _rss_bytes()
         record("draining")
         if capture_ready_at is not None:
             remaining = capture_seconds - (time.monotonic() - capture_ready_at)
@@ -220,10 +196,7 @@ def collect_plan(plan_path: Path, output_dir: Path, server_config_path: Path) ->
                    "attempt_record": str(attempt_path), "event_file": str(event_file),
                    "capture": capture_result or {"status": "unavailable", "error": "; ".join(capture_error)},
                    "cost": {"wall_ns": attempt.end_wall_ns - attempt.start_wall_ns,
-                            "orchestrator_cpu_ns": cpu_ns, "rss_before_bytes": rss_before,
-                            "rss_after_bytes": rss_after,
-                            "memory_peak_bytes": None,
-                            "memory_method": "unavailable; no per-session child process accounting"}}
+                            **client_cost}}
         outcomes.append(outcome)
         labels.append({"session_id": episode["session_id"], "execution_stack": episode["execution_stack"],
                        "client_family": episode["client_family"], "controller": episode["controller"],
@@ -403,13 +376,27 @@ def _active_event_file(output_dir: Path, control_port: int) -> Path:
     return event_file
 
 
-def _rss_bytes() -> int | None:
+def _run_measured_client(episode: dict, origin: str, ca_file: Path, timeout: float,
+                         control_port: int) -> tuple[ExecutionResult, dict]:
+    """Run one adapter in an isolated worker and return worker/process-tree costs."""
+    request = {"adapter": episode["adapter"], "session_id": episode["session_id"],
+               "origin": origin, "ca_file": str(ca_file.resolve()), "timeout": timeout,
+               "control_port": control_port, "profile": episode.get("profile"),
+               "imitation_stage": episode.get("imitation_stage", 1)}
+    worker_started = time.monotonic_ns()
+    worker = subprocess.run([sys.executable, "-m", "beyond_handshake.client_worker"],
+                            input=json.dumps(request), text=True, capture_output=True,
+                            timeout=timeout + 30, cwd=Path(__file__).resolve().parents[2])
+    worker_wall_ns = time.monotonic_ns() - worker_started
+    if worker.returncode:
+        raise RuntimeError(f"client worker exited {worker.returncode}: {worker.stderr[-1000:]}")
     try:
-        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # Linux reports KiB; macOS reports bytes. This project is Linux-first.
-        return int(value * 1024)
-    except (AttributeError, OSError, ValueError):
-        return None
+        payload = json.loads(worker.stdout)
+        attempt = ExecutionResult(**payload["result"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"client worker returned invalid result: {worker.stderr[-1000:]}") from exc
+    return attempt, {"status": "measured", "worker_wall_ns": worker_wall_ns,
+                     **attempt.resource_metrics}
 
 
 def _sha256(path: Path) -> str:

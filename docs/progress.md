@@ -1,8 +1,15 @@
 # Implementation progress
 
-**Last updated:** 2026-10-26 (Asia/Kolkata)
+**Last updated:** 2026-10-27 (Asia/Kolkata)
 
 This page distinguishes working prototype components from complete requirements in `MASTER_BUILD_DOCUMENT.md`. Components through Phase 12 exist, but acceptance remains evidence-based. No final-test dataset or supported research finding exists.
+
+## Per-episode client resource instrumentation on 2026-10-27
+
+- Replaced the previous collector-process CPU delta and process-lifetime RSS high-water mark in `src/beyond_handshake/experiment.py`. Each adapter now runs in `src/beyond_handshake/client_worker.py`, isolated from the collector/server process, with Linux `/proc` sampling every 20 ms across the worker's descendant process tree.
+- Episode cost metadata now records adapter wall time, worker wall time, sampled process-tree CPU nanoseconds, and peak aggregate resident memory. The method string explicitly identifies Linux `/proc` sampling and worker isolation. The sampling interval can miss very short-lived processes; this is a development measurement method, not cgroup-grade accounting.
+- Checks run: `UV_CACHE_DIR=/tmp/bh-uv-cache uv run python -m compileall -q src/beyond_handshake` completed successfully; `git diff --check` completed successfully. Ruff was unavailable in the active environment (`uv run ruff`: executable not found). No collection was run, so no resource-cost observations have yet been produced.
+- Remaining: a real collection is needed to validate measured output for each adapter. Controlled additional task and network-path conditions are not implemented here; the current workload is restricted by development preflight to the catalog task, and packet capture is hardcoded to loopback. A second path requires an explicitly configured controlled interface/network point; loopback delay must not be presented as a real path shift. No participant data were collected.
 
 ## Phase 0 — Scope and protocol
 
