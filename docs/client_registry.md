@@ -26,7 +26,7 @@ The adapter is available to development plans. It has not been collected as a fi
 - Stage 0 runs curl_cffi without `impersonate` or added browser headers; the Go condition uses ordinary `net/http`/`crypto/tls`.
 - Stage 1 runs curl_cffi with the explicit `chrome150` profile and header template; the Go condition uses Go `tls-client` with `profiles.Chrome_150` and the same declared header values.
 
-The Go stage comparison changes the client library as well as the fingerprint configuration. Interpret it as an ordinary-Go-to-impersonation-stack comparison, not a clean within-library treatment effect. The curl_cffi stages hold the library constant. The browser-profile header template is an experimental configuration and is not evidence of exact Chrome parity. The installed Chrome 156.0.8078.47 was exercised in a local pilot, but the available curl-cffi and Go tls-client profiles target Chrome 150. It is a real-browser reference, not a matching-profile parity reference. See `docs/chrome156_fidelity_pilot.md`.
+The Go stage comparison changes the client library as well as the fingerprint configuration. Interpret it as an ordinary-Go-to-impersonation-stack comparison, not a clean within-library treatment effect. The curl_cffi stages hold the library constant. The browser-profile header template is an experimental configuration and is not evidence of exact Chrome parity. The installed Chrome 156.0.8078.47 and a pinned Chrome for Testing 150.0.7871.124 were exercised in separate local pilots. The latter matches the profile milestone, not a declared exact build or full fingerprint. See `docs/chrome156_fidelity_pilot.md` and `docs/chrome150_fidelity_pilot.md`.
 
 ## Stage 2 and stage 3 development conditions
 
